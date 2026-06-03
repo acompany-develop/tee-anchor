@@ -1,0 +1,26 @@
+/*
+ * sample_enclave.edl
+ *
+ * TEE Anchor 付属の「最小 Quote 取得サンプル」用 EDL。
+ * Humane-RAFW-MAA の server_enclave.edl から、Quote の素材となる
+ * REPORT 生成に必要な ECALL/OCALL だけを抜き出したもの。
+ *
+ * RA セッション・鍵交換・サンプル演算など本筋に不要なものは全て削除している。
+ */
+enclave
+{
+    include "sgx_report.h"
+
+    trusted
+    {
+        /*
+         * QE3 を target とする REPORT 構造体を生成する。
+         * report_data は呼び出し側が任意に埋められる 64 バイト
+         * （本サンプルでは既定で 0 埋め）。
+         */
+        public sgx_status_t ecall_create_report(
+            [in]const sgx_target_info_t *qe_target_info,
+            [in]const sgx_report_data_t *report_data,
+            [out]sgx_report_t *report);
+    };
+};

@@ -1,0 +1,44 @@
+# ==============================================================================
+# TEE Anchor のビルド成果物
+# ==============================================================================
+/tee-anchor
+*.o
+*.a
+*.so
+
+# ==============================================================================
+# 実行時データ (組織 CA 秘密鍵を含むため絶対にコミットしないこと)
+# ==============================================================================
+/runtime/
+
+# ==============================================================================
+# 過去のテスト時に残存していた SGX Quote
+# ==============================================================================
+/provision/sgx/quote.dat
+
+# ==============================================================================
+# provision/sgx/sgx_sample のビルド成果物
+# (sgx_sample は独立した Makefile を持つサブプロジェクト)
+# ==============================================================================
+/provision/sgx/sgx_sample/sample_app
+/provision/sgx/sgx_sample/enclave.so
+/provision/sgx/sgx_sample/enclave.signed.so
+/provision/sgx/sgx_sample/quote.dat
+# Edger8r が自動生成する untrusted / trusted のエッジ関数ソース
+/provision/sgx/sgx_sample/App/sample_enclave_u.c
+/provision/sgx/sgx_sample/App/sample_enclave_u.h
+/provision/sgx/sgx_sample/App/*.o
+/provision/sgx/sgx_sample/Enclave/sample_enclave_t.c
+/provision/sgx/sgx_sample/Enclave/sample_enclave_t.h
+/provision/sgx/sgx_sample/Enclave/*.o
+# Makefile が自動生成する Enclave 署名鍵
+/provision/sgx/sgx_sample/Enclave/private_key.pem
+
+# ==============================================================================
+# エディタ / OS 固有
+# ==============================================================================
+.vscode/
+.idea/
+*.swp
+*.swo
+.DS_Store
