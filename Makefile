@@ -10,7 +10,7 @@
 
 CXX      ?= g++
 CXXFLAGS ?= -std=c++17 -O2 -Wall -Wextra
-INCLUDES := -Icommon -Ica -Iprovision -Iprovision/sgx -Iverify -I.
+INCLUDES := -Icommon -Ica -Iprovision -Iprovision/sgx -Iprovision/sev-snp -Iverify -I.
 LDLIBS   := -lcrypto
 
 BIN      := tee-anchor
@@ -24,6 +24,7 @@ SRCS := \
     binding/chip_id_binding.cpp \
     provision/provision.cpp \
     provision/sgx/sgx_provision.cpp \
+    provision/sev-snp/snp_provision.cpp \
     verify/verify.cpp
 
 HDRS := \
@@ -40,6 +41,8 @@ HDRS := \
     provision/provision.hpp \
     provision/sgx/sgx_provision.hpp \
     provision/sgx/intel_sgx_root_pubkey.hpp \
+    provision/sev-snp/snp_provision.hpp \
+    provision/sev-snp/amd_ark_pubkeys.hpp \
     verify/verify.hpp
 
 .PHONY: all clean
@@ -58,6 +61,6 @@ clean:
 	@rm -f $(BIN)
 	@rm -f tee_anchor.o \
 	       ca/*.o binding/*.o common/*.o \
-	       provision/*.o provision/sgx/*.o \
+	       provision/*.o provision/sgx/*.o provision/sev-snp/*.o \
 	       verify/*.o
 	@echo "cleaned: $(BIN) (+ any stray .o under our source tree)"

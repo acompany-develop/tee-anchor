@@ -20,6 +20,7 @@
 #include "pki_util.hpp"
 
 #include "binding/chip_id_binding.hpp"
+#include "sev-snp/snp_provision.hpp"
 #include "sgx/sgx_provision.hpp"
 
 namespace tee_anchor::verify {
@@ -27,25 +28,35 @@ namespace tee_anchor::verify {
 namespace {
 
 constexpr int kExitOk          = 0;
-constexpr int kExitPckFailed   = 20;
+constexpr int kExitEvidence    = 20;  // ベンダー証拠検証失敗 (SGX: PCK / SNP: VCEK・署名)
 constexpr int kExitOrgFailed   = 21;
 constexpr int kExitMismatch    = 22;
 constexpr int kExitRevoked     = 24;
 constexpr int kExitInternal    = 30;
 
-struct PckResult {
-    std::vector<uint8_t> ppid;
-};
-
-PckResult verify_pck_and_extract_ppid_sgx(const std::vector<uint8_t>& quote) {
-    auto chain = sgx::extract_pck_chain_from_quote(quote);
-    X509* leaf = sgx::verify_pck_chain(chain);
-    auto ppid = sgx::find_sgx_extension_octet(leaf, sgx::OID_SGX_PPID);
-    if (!ppid) {
-        throw TeeAnchorError("PPID (OID " + std::string(sgx::OID_SGX_PPID) +
-                             ") not found in PCK leaf");
+// attestation 証拠 (Quote / Report+VCEK) をベンダー検証し、Chip ID を取り出す。
+// TEE 種別ごとに検証経路が異なるが、いずれも「検証通過後にだけ Chip ID を返す」。
+// 検証失敗時は TeeAnchorError (呼び出し側で exit 20 に変換)。
+std::vector<uint8_t> verify_evidence_and_extract_chip_id(const VerifyArgs& args) {
+    if (args.tee_type == "sgx") {
+        auto quote = read_file(args.quote_path);
+        auto chain = sgx::extract_pck_chain_from_quote(quote);
+        X509* leaf = sgx::verify_pck_chain(chain);
+        auto ppid = sgx::find_sgx_extension_octet(leaf, sgx::OID_SGX_PPID);
+        if (!ppid) {
+            throw TeeAnchorError("PPID (OID " + std::string(sgx::OID_SGX_PPID) +
+                                 ") not found in PCK leaf");
+        }
+        return *ppid;
     }
-    return PckResult{*ppid};
+    if (args.tee_type == "snp") {
+        // provision と同じ検証経路を再利用 (ARK pin + snpguest verify certs/attestation)。
+        // verify では VCEK leaf は不要なので chip_id のみ受け取る。
+        snp::SnpVerifyResult r =
+            snp::verify_and_extract(args.report_path, args.certs_dir, args.snpguest_bin);
+        return std::move(r.chip_id);
+    }
+    throw TeeAnchorError("unknown --tee-type: " + args.tee_type);
 }
 
 enum class OrgChainStatus { Ok, Revoked, OtherFail };
@@ -113,27 +124,26 @@ int run_verify(const VerifyArgs& args) {
         if (v.empty()) throw TeeAnchorError(std::string(name) + " is required");
     };
     try {
-        require(args.quote_path,    "--quote");
         require(args.org_cert_path, "--org-cert");
         require(args.org_ca_path,   "--org-ca");
+        // TEE 種別ごとに証拠の入力が異なる (SGX: Quote / SNP: Report + 証明書dir)。
+        if (args.tee_type == "sgx") {
+            require(args.quote_path, "--quote");
+        } else if (args.tee_type == "snp") {
+            require(args.report_path, "--report");
+            require(args.certs_dir,   "--certs");
+        } else {
+            throw TeeAnchorError("unknown --tee-type: " + args.tee_type);
+        }
     } catch (const std::exception& e) {
         std::fprintf(stderr, "[error] %s\n", e.what());
         return kExitInternal;
     }
 
-    if (args.tee_type != "sgx") {
-        std::fprintf(stderr,
-            "[error] --tee-type %s is not implemented in Phase 1\n",
-            args.tee_type.c_str());
-        return kExitInternal;
-    }
-
     // 入力ロード (IO エラー)
-    std::vector<uint8_t> quote;
     X509Ptr    org_cert, org_ca;
     X509CrlPtr org_crl;
     try {
-        quote    = read_file(args.quote_path);
         org_cert = pki::load_pem_cert(args.org_cert_path);
         org_ca   = pki::load_pem_cert(args.org_ca_path);
         if (!args.crl_path.empty()) {
@@ -144,14 +154,14 @@ int run_verify(const VerifyArgs& args) {
         return kExitInternal;
     }
 
-    // (1) PCK chain 検証 + PPID 抽出
-    PckResult pck;
+    // (1) ベンダー証拠検証 + Chip ID 抽出 (TEE 種別ごとに dispatch)
+    std::vector<uint8_t> evidence_chip_id;
     try {
-        pck = verify_pck_and_extract_ppid_sgx(quote);
+        evidence_chip_id = verify_evidence_and_extract_chip_id(args);
     } catch (const std::exception& e) {
         std::fprintf(stderr,
-            "[fail/20] PCK chain / PPID extraction failed: %s\n", e.what());
-        return kExitPckFailed;
+            "[fail/20] attestation evidence verification failed: %s\n", e.what());
+        return kExitEvidence;
     }
 
     // (2) 組織 endorsement chain 検証 (+ 任意で CRL)
@@ -193,12 +203,12 @@ int run_verify(const VerifyArgs& args) {
             return kExitMismatch;
         }
 
-        if (chip.chip_id.size() != pck.ppid.size() ||
+        if (chip.chip_id.size() != evidence_chip_id.size() ||
             !std::equal(chip.chip_id.begin(), chip.chip_id.end(),
-                        pck.ppid.begin())) {
+                        evidence_chip_id.begin())) {
             std::fprintf(stderr, "[fail/22] Chip ID mismatch:\n");
-            std::fprintf(stderr, "  from quote       : %s (%zu bytes)\n",
-                         to_hex_lower(pck.ppid).c_str(), pck.ppid.size());
+            std::fprintf(stderr, "  from evidence    : %s (%zu bytes)\n",
+                         to_hex_lower(evidence_chip_id).c_str(), evidence_chip_id.size());
             std::fprintf(stderr, "  from endorsement : %s (%zu bytes)\n",
                          to_hex_lower(chip.chip_id).c_str(), chip.chip_id.size());
             return kExitMismatch;
@@ -207,7 +217,7 @@ int run_verify(const VerifyArgs& args) {
         std::printf("verify: OK\n");
         std::printf("  tee_type       : %s (%u)\n",
                     binding::tee_type_name(chip.tee_type), chip.tee_type);
-        std::printf("  chip_id (hex)  : %s\n", to_hex_lower(pck.ppid).c_str());
+        std::printf("  chip_id (hex)  : %s\n", to_hex_lower(evidence_chip_id).c_str());
         std::printf("  endorsement DN : ");
         {
             char buf[256];
@@ -244,25 +254,38 @@ int cli_verify(int argc, char** argv) {
         for (int i = 0; i < argc; ++i) {
             std::string a = argv[i];
             if      (a == "--quote")    args.quote_path    = need_value(i, "--quote");
+            else if (a == "--report")   args.report_path   = need_value(i, "--report");
+            else if (a == "--certs")    args.certs_dir     = need_value(i, "--certs");
+            else if (a == "--snpguest") args.snpguest_bin  = need_value(i, "--snpguest");
             else if (a == "--org-cert") args.org_cert_path = need_value(i, "--org-cert");
             else if (a == "--org-ca")   args.org_ca_path   = need_value(i, "--org-ca");
             else if (a == "--crl")      args.crl_path      = need_value(i, "--crl");
             else if (a == "--tee-type") args.tee_type      = need_value(i, "--tee-type");
             else if (a == "-h" || a == "--help") {
                 std::printf(
-                    "Usage: tee-anchor verify --quote <file> --org-cert <file> --org-ca <file> [options]\n"
+                    "Usage:\n"
+                    "  tee-anchor verify --tee-type sgx --quote <file> --org-cert <file> --org-ca <file> [options]\n"
+                    "  tee-anchor verify --tee-type snp --report <file> --certs <dir> --org-cert <file> --org-ca <file> [options]\n"
                     "\n"
-                    "Options:\n"
-                    "  --quote <file>         (required) SGX Quote (binary, quote.dat)\n"
+                    "Common options:\n"
                     "  --org-cert <file>      (required) organization endorsement cert (PEM)\n"
                     "  --org-ca <file>        (required) organization root CA cert (PEM, trust anchor)\n"
                     "  --crl <file>           organization CRL (PEM). When given, endorsement is also\n"
                     "                         checked against this CRL (exit 24 if revoked).\n"
-                    "  --tee-type <sgx>       TEE type (default: sgx; only sgx implemented in Phase 1)\n"
+                    "  --tee-type <sgx|snp>   TEE type (default: sgx)\n"
+                    "\n"
+                    "SGX options (--tee-type sgx):\n"
+                    "  --quote <file>         (required) SGX Quote (binary, quote.dat)\n"
+                    "\n"
+                    "SEV-SNP options (--tee-type snp):\n"
+                    "  --report <file>        (required) SNP attestation report (binary, report.bin)\n"
+                    "  --certs <dir>          (required) dir with ark.pem/ask.pem/vcek.pem (from snpguest fetch)\n"
+                    "  --snpguest <path>      snpguest binary used for chain/report verification\n"
+                    "                         (default: looked up on PATH)\n"
                     "\n"
                     "Exit codes:\n"
                     "  0   all checks passed\n"
-                    " 20   PCK chain verification failed\n"
+                    " 20   attestation evidence verification failed (SGX: PCK chain / SNP: VCEK chain or report signature)\n"
                     " 21   organization endorsement chain verification failed\n"
                     " 22   Chip ID mismatch (= proxy attack detected)\n"
                     " 24   endorsement revoked by organization CRL\n"

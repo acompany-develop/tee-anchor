@@ -35,6 +35,15 @@
 /provision/sgx/sgx_sample/Enclave/private_key.pem
 
 # ==============================================================================
+# provision/sev-snp/snp-sample の生成物
+# (report.bin は実機固有の Attestation Report、certs/ は KDS から取得した
+#  VCEK チェーン。いずれも get_attestation.sh で再生成できる)
+# ==============================================================================
+/provision/sev-snp/snp-sample/report.bin
+/provision/sev-snp/snp-sample/request-data.txt
+/provision/sev-snp/snp-sample/certs/
+
+# ==============================================================================
 # エディタ / OS 固有
 # ==============================================================================
 .vscode/

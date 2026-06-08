@@ -58,11 +58,25 @@ Phase 1 の root cert は `BasicConstraints CA:TRUE` を pathLenConstraint **な
   - 論文の脅威モデル説明上も「Chip ID = PPID」という一行で済む方が清潔
 - 環境差で PPID が暗号化形式 / 0 埋めで提供される場合のフォールバック（PCK leaf の Subject Key Identifier 等）は Phase 2 以降で検討。実装上は all-zero PPID を検知時に警告する。
 
-### AMD SEV-SNP
+### AMD SEV-SNP（実装済 / provision のみ）
 
-- VCEK Cert の Subject に `HWID` extension（OID `1.3.6.1.4.1.3704.1.4`）として 64 バイトの CHIP_ID
-- Attestation Report の `CHIP_ID` フィールドにも同値が含まれる
-- 両者を照合する
+SGX/TDX と異なり、**Chip ID が attestation 本体（署名対象）に含まれる**ため、証明書ではなく Report から抽出する。
+
+- **抽出元 = Attestation Report の `CHIP_ID` フィールド（オフセット `0x1A0`、64 バイト）**。
+  - このオフセットは AMD SEV-SNP Firmware ABI Spec (Rev 1.58) の Table 23 で定義され、Report VERSION 2〜5 で**不変**（v3 で CPUID 3 バイト、v5 で MIT vector が追加されたが、いずれも旧 Reserved 領域の消費であり既存フィールドは移動していない）。署名対象 `0x0–0x29F` / SIGNATURE `0x2A0–0x49F` / 全長 1184B も固定。
+  - 実装は VERSION が既知範囲（2〜5）であることを確認し、未知の上位バージョンは安全側に倒して拒否する（SGX で cert_key_type==5 を要求するのと同じ防御線）。
+- VCEK Cert にも同値が `HWID` extension（OID `1.3.6.1.4.1.3704.1.4`）として載っているため、抽出した CHIP_ID と VCEK hwID を**ダメ押しでクロスチェック**する（必須ではないが両ソースの一致を明示）。
+- **`MaskChipId=1` のプラットフォームでは CHIP_ID が 0 埋め**される。この場合 chip 固有でない値を bind してしまい binding が無意味になるため、all-zero を検知したら**エラーで停止**する（SGX の暗号化 PPID は警告のみだが、SNP の masked CHIP_ID はより明確に危険なため停止）。
+
+#### ベンダー検証の委譲（snpguest）
+
+VCEK チェーン検証（ARK→ASK→VCEK）と Report 署名検証（VCEK が `0x0–0x29F` に ECDSA-P384/SHA-384 で署名）は、AMD 製ツール **snpguest** に委譲する。
+
+- 役割分担: SGX でベンダー検証を Intel QvL に委ねるのと同型。TEE Anchor 本体は「組織 endorsement + Chip ID binding」レイヤに集中する。AMD の RSA-PSS チェーンや LE エンコードの ECDSA 署名を自前再実装するより、検証実績のある snpguest に委ねるほうが堅牢。
+- ただし**信頼根（AMD ARK）は TEE Anchor 側でも pin する**。snpguest は KDS 取得物のチェーン整合性しか見ず既知 root への pin をしないため、`provision/sev-snp/amd_ark_pubkeys.hpp` にハードコードした各世代 ARK の公開鍵 SHA-384（Milan/Genoa/Turin、AMD KDS の `cert_chain` から取得）と照合する。これで SGX の Intel root ハードコードと同じ「信頼根はコードが握る」プロパティを保つ。
+- provision の検証フロー: **ARK pin 照合 → `snpguest verify certs` → `snpguest verify attestation` → 通過後に CHIP_ID 抽出**。
+
+> 注: SNP の verify サブコマンド対応は未実装（現状 provision のみ）。endorsement の Subject Public Key には SGX の PCK leaf と対称に **VCEK leaf の公開鍵**を流用する。
 
 ## X.509 拡張 OID 設計
 
@@ -118,18 +132,26 @@ Phase 1 では DER エンコード済みのバイト列を OCTET STRING にそ�
 
 ### `tee-anchor provision`
 
-引数：
-- `--quote <file>` (required): 入力する Quote（バイナリ、`quote.dat`）
+共通引数：
 - `--ca-key <file>` (required): 組織 CA 秘密鍵
 - `--ca-cert <file>` (required): 組織 CA 証明書
 - `--out <file>` (required): 出力先（組織エンドースメント証明書、PEM）
 - `--subject <DN>`: 発行する証明書の Subject DN（省略時は Chip ID から自動生成）
 - `--validity-days <N>`: 有効期限（デフォルト 365）
-- `--tee-type <sgx|tdx|snp>`: TEE 種別（デフォルト `sgx`、Phase 1 では `sgx` のみ実装）
+- `--tee-type <sgx|snp>`: TEE 種別（デフォルト `sgx`）
 
-設計判断: provision / verify とも入力は `quote.dat` 1 つに統一する。Quote の Certification Data（`cert_key_type == 5`）に PCK 証明書チェーンが内包されており、別途 PCS / PCCS から PCK 証明書を取得する必要がないため。
+SGX 用引数（`--tee-type sgx`）：
+- `--quote <file>` (required): 入力する Quote（バイナリ、`quote.dat`）
 
-処理：
+SEV-SNP 用引数（`--tee-type snp`）：
+- `--report <file>` (required): Attestation Report（バイナリ、`report.bin`）
+- `--certs <dir>` (required): `ark.pem` / `ask.pem` / `vcek.pem` を含むディレクトリ（snpguest fetch で取得）
+- `--snpguest <path>`: snpguest 実行ファイル（省略時は PATH から探索）
+
+設計判断（SGX）: 入力は `quote.dat` 1 つに統一する。Quote の Certification Data（`cert_key_type == 5`）に PCK 証明書チェーンが内包されており、別途 PCS / PCCS から PCK 証明書を取得する必要がないため。
+設計判断（SNP）: SNP の Report には証明書チェーンが含まれないため、KDS から取得した VCEK チェーン（`certs/`）を Report と併せて入力に取る。
+
+処理（SGX）：
 1. Quote をロードしバイナリ構造をパース、Certification Data から PCK 証明書チェーンを抽出
 2. PCK チェーンを **ハードコードした Intel SGX Root CA 公開鍵**（QvE 互換、SEC1 uncompressed 65B）に対して検証
 3. 検証通過した leaf 証明書の SGX Extensions から PPID(16B) を抽出
@@ -140,25 +162,49 @@ Phase 1 では DER エンコード済みのバイト列を OCTET STRING にそ�
 7. 組織 CA 秘密鍵で署名
 8. PEM 形式で出力
 
+処理（SNP）：
+1. Report をロードしヘッダを検証（長さ 1184B、VERSION ∈ 2..5、SIGNATURE_ALGO == ECDSA-P384/SHA-384）
+2. `certs/ark.pem` の公開鍵を **ハードコードした AMD ARK 公開鍵 SHA-384**（Milan/Genoa/Turin）と pin 照合
+3. **snpguest** で `verify certs`（ARK→ASK→VCEK）と `verify attestation`（VCEK が Report に署名）を実行
+4. 検証通過後に Report の `CHIP_ID`（offset `0x1A0`、64B）を抽出（all-zero なら MaskChipId としてエラー）。VCEK hwID とクロスチェック
+5. 新規鍵ペアは生成せず、VCEK leaf の公開鍵を Subject Public Key として使用
+6. ChipIdBinding extension（Critical、`teeType = sevSnp(2)`、`chipId = CHIP_ID`）を追加
+7. 組織 CA 秘密鍵で署名
+8. PEM 形式で出力
+
 CRL は本サブコマンドでは確認しない。理由は本ドキュメントの「CRL 設計」節を参照。
 
 ### `tee-anchor verify`
 
-引数：
-- `--quote <file>` (required): SGX Quote（バイナリ）
-- `--org-cert <file>` (required): 組織エンドースメント証明書（PEM）
-- `--org-ca <file>` (required): 組織 Root CA 証明書（PEM）
-- `--intel-root <file>`: Intel SGX Root CA 証明書（PEM、デフォルトはバンドル）
-- `--json`: 結果を JSON で出力
+provision と同じく証拠の入力が TEE 種別で異なる。検証は「(1) ベンダー証拠検証 + Chip ID 抽出 → (2) 組織 chain 検証(+任意 CRL) → (3) Chip ID bit-for-bit 照合」の 3 段で、(1) だけが TEE 別、(2)(3) は共通。
 
-処理：
-1. Quote をパース、CERT_DATA から PCK Cert チェーンを抽出
-2. PCK Cert チェーンを Intel Root CA で検証（標準 DCAP 検証フロー）
-3. 組織エンドースメント証明書を組織 CA で検証
-4. PCK Cert と組織エンドースメント証明書から Chip ID をそれぞれ抽出
-5. **bit-for-bit 一致確認**
-6. Quote の ECDSA 署名を PCK Cert の公開鍵で検証
-7. 全成功で exit 0、各失敗ステップに応じた非ゼロ exit code
+共通引数：
+- `--org-cert <file>` (required): 組織エンドースメント証明書（PEM）
+- `--org-ca <file>` (required): 組織 Root CA 証明書（PEM、trust anchor）
+- `--crl <file>`: 組織 CRL（PEM、任意。指定時のみ失効チェックを行い、失効なら exit 24）
+- `--tee-type <sgx|snp>`: TEE 種別（デフォルト `sgx`）
+
+SGX 用引数（`--tee-type sgx`）：
+- `--quote <file>` (required): SGX Quote（バイナリ）
+
+SEV-SNP 用引数（`--tee-type snp`）：
+- `--report <file>` (required): SNP Attestation Report（バイナリ、`report.bin`）
+- `--certs <dir>` (required): `ark.pem` / `ask.pem` / `vcek.pem` を含むディレクトリ
+- `--snpguest <path>`: snpguest 実行ファイル（省略時は PATH から探索）
+
+処理（SGX）：
+1. Quote をパース、CERT_DATA から PCK Cert チェーンを抽出 → Intel Root CA(ハードコード公開鍵)で検証 → PPID を抽出
+2. 組織エンドースメント証明書を組織 CA で検証（ChipIdBinding は Critical のため `X509_V_FLAG_IGNORE_CRITICAL`、`--crl` 指定時は `X509_V_FLAG_CRL_CHECK`）
+3. ChipIdBinding の `chipId` と PPID を **bit-for-bit 一致確認**
+4. 全成功で exit 0、各失敗ステップに応じた非ゼロ exit code
+
+処理（SNP）：
+1. Report ヘッダ検証 → ARK pin 照合 → **snpguest** で `verify certs` + `verify attestation` → 通過後に CHIP_ID(0x1A0, 64B) を抽出（provision と同一経路を再利用）
+2. 組織エンドースメント証明書を組織 CA で検証（SGX と共通）
+3. ChipIdBinding の `chipId` と CHIP_ID を **bit-for-bit 一致確認**
+4. 全成功で exit 0
+
+> 注: provision と同様、Quote/Report の署名・チェーン検証はベンダー側（SGX: 自前 PCK 検証 or 実運用では QvL / SNP: snpguest）に閉じ、TEE Anchor のコア責務は組織 endorsement と Chip ID binding の照合にある。
 
 ### Exit Code 設計
 

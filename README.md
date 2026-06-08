@@ -22,7 +22,10 @@
 sudo apt-get install -y build-essential libssl-dev
 ```
 
-> Phase 1 の現状スコープは **SGX のみ**。TDX / SEV-SNP は Phase 2 で順次追加予定。
+> SGX 経路は OpenSSL のみで自己完結します。**SEV-SNP の provision** は、ベンダー検証
+> （VCEK チェーン + Report 署名）を AMD 製ツール [snpguest](https://github.com/virtee/snpguest)
+> に委譲するため、SNP を使う場合のみ追加で snpguest が必要です（導入は
+> `provision/sev-snp/snp-sample/` を参照）。TDX は今後追加予定。
 
 ---
 
@@ -42,8 +45,8 @@ make clean      # 生成物を削除
 | サブコマンド | 役割 |
 |---|---|
 | `ca-init`   | 組織 Root CA 鍵 + 自己署名証明書を発行 |
-| `provision` | Quote から PPID を抽出 → 組織 CA で署名した endorsement 証明書を発行 |
-| `verify`    | Quote + endorsement + 組織 CA で Chip ID binding を検証 (任意で CRL チェック) |
+| `provision` | 証拠から Chip ID を抽出 → 組織 CA で署名した endorsement 証明書を発行 (SGX: Quote→PPID / SNP: Report→CHIP_ID) |
+| `verify`    | 証拠 + endorsement + 組織 CA で Chip ID binding を検証 (SGX: Quote / SNP: Report+VCEK、任意で CRL チェック) |
 | `revoke`    | endorsement の serial を失効リスト DB に追加 |
 | `crl-issue` | DB から X.509 CRL を発行 |
 
@@ -112,6 +115,45 @@ echo "exit=$?"   # → 24
 
 `--crl` は **任意指定**で、付けない verify は CRL チェックなしで動作します（後方互換）。
 
+### SEV-SNP の provision
+
+SEV-SNP では Chip ID が Attestation Report 本体（オフセット 0x1A0）に含まれるため、
+証明書ではなく **Report から CHIP_ID(64B) を抽出**します。ベンダー検証（VCEK チェーン
+検証 + Report 署名検証）は **snpguest に委譲**し、TEE Anchor 側では AMD ARK を
+ハードコード済み既知値（Milan/Genoa/Turin）に pin 照合します。
+
+```sh
+# (SEV-SNP CVM 上で) Report と VCEK チェーンを取得
+cd provision/sev-snp/snp-sample
+./get_attestation.sh        # report.bin と certs/{ark,ask,vcek}.pem を生成
+cd -
+
+# Report から CHIP_ID を抽出して endorsement を発行
+./tee-anchor provision --tee-type snp \
+    --report provision/sev-snp/snp-sample/report.bin \
+    --certs  provision/sev-snp/snp-sample/certs \
+    --snpguest ~/snpguest/target/release/snpguest \
+    --ca-key  "$W/ca.key" \
+    --ca-cert "$W/ca.crt" \
+    --out     "$W/snp_endorsement.crt"
+```
+
+発行した endorsement の検証も同じ証拠で行えます（exit code は SGX と共通）：
+
+```sh
+./tee-anchor verify --tee-type snp \
+    --report   provision/sev-snp/snp-sample/report.bin \
+    --certs    provision/sev-snp/snp-sample/certs \
+    --snpguest ~/snpguest/target/release/snpguest \
+    --org-cert "$W/snp_endorsement.crt" \
+    --org-ca   "$W/ca.crt"
+echo "exit=$?"   # → 0
+```
+
+検証フロー: ARK pin 照合 → `snpguest verify certs` → `snpguest verify attestation`
+→ 通過後に CHIP_ID 抽出 → 組織 chain 検証 → Chip ID bit-for-bit 照合。
+詳細は `provision/sev-snp/snp-sample/README.md`。
+
 ---
 
 ## verify の exit code
@@ -119,7 +161,7 @@ echo "exit=$?"   # → 24
 | code | 意味 |
 |---:|---|
 | 0  | 全検証成功 |
-| 20 | PCK chain 検証失敗 (Quote が偽 or 改竄、Intel Root に紐付かない) |
+| 20 | ベンダー証拠検証失敗 (SGX: PCK chain / SNP: VCEK chain・Report 署名。偽 or 改竄、ベンダー root に紐付かない) |
 | 21 | 組織 endorsement chain 検証失敗 (CA 不一致など) |
 | 22 | **Chip ID 不一致 (= Proxy/Relay 攻撃検出)** |
 | 24 | 組織 CRL により endorsement が失効済み |
@@ -155,11 +197,15 @@ tee-anchor/
 ├── common/                     共有ヘッダ (RAII, 例外, I/O, PKI ユーティリティ)
 ├── ca/                         ca-init / revoke / crl-issue
 ├── binding/                    ChipIdBinding 拡張の DER エンコード/デコード
-├── provision/                  provision サブコマンド (+ SGX 固有処理)
-│   └── sgx/
-│       ├── sgx_provision.{hpp,cpp}      Quote パース + PCK chain 検証 + PPID 抽出
-│       ├── intel_sgx_root_pubkey.hpp    Intel SGX Root CA 公開鍵 (QvE と同値)
-│       └── sgx_sample/                  Quote 取得用ミニサンプル
+├── provision/                  provision サブコマンド (+ TEE 固有処理)
+│   ├── sgx/
+│   │   ├── sgx_provision.{hpp,cpp}      Quote パース + PCK chain 検証 + PPID 抽出
+│   │   ├── intel_sgx_root_pubkey.hpp    Intel SGX Root CA 公開鍵 (QvE と同値)
+│   │   └── sgx_sample/                  Quote 取得用ミニサンプル
+│   └── sev-snp/
+│       ├── snp_provision.{hpp,cpp}      Report パース + CHIP_ID 抽出 (検証は snpguest 委譲)
+│       ├── amd_ark_pubkeys.hpp          AMD ARK pin (Milan/Genoa/Turin の SPKI SHA-384)
+│       └── snp-sample/                  Report/VCEK 取得サンプル (snpguest ラッパ)
 ├── verify/                     verify サブコマンド
 └── docs/                       設計ドキュメント
 ```

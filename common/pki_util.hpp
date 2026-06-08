@@ -10,6 +10,7 @@
 
 #include <openssl/bn.h>
 #include <openssl/buffer.h>
+#include <openssl/crypto.h>
 #include <openssl/evp.h>
 #include <openssl/core_names.h>
 #include <openssl/pem.h>
@@ -182,6 +183,32 @@ inline Asn1ObjectPtr make_oid(const char* oid_str) {
     Asn1ObjectPtr obj(OBJ_txt2obj(oid_str, /*no_name=*/1));
     if (!obj) throw_openssl_error("OBJ_txt2obj");
     return obj;
+}
+
+// 証明書の公開鍵 (SubjectPublicKeyInfo, DER) の SHA-384 ダイジェストを返す。
+// 信頼アンカーを「鍵の種類に依らず」pin するための共通ヘルパ。
+// SGX (P-256) は生の EC point を直接比較しているが、AMD ARK は RSA-4096 で
+// 生鍵が嵩むため、SNP 側では本関数で得た 48 バイトのダイジェストを pin する。
+inline std::vector<uint8_t> pubkey_spki_sha384(X509* cert) {
+    EVP_PKEY* pkey = X509_get0_pubkey(cert);  // borrowed
+    if (!pkey) throw_openssl_error("X509_get0_pubkey");
+
+    // i2d_PUBKEY は OPENSSL_malloc したバッファを返す。OPENSSL_free は OpenSSL 3.x
+    // ではマクロのため関数ポインタが取れない。一旦 vector に取り込んでから手で解放する。
+    unsigned char* der = nullptr;
+    const int der_len = i2d_PUBKEY(pkey, &der);
+    if (der_len <= 0) throw_openssl_error("i2d_PUBKEY");
+    std::vector<uint8_t> spki(der, der + der_len);
+    OPENSSL_free(der);
+
+    std::vector<uint8_t> digest(EVP_MAX_MD_SIZE);
+    unsigned int out_len = 0;
+    if (EVP_Digest(spki.data(), spki.size(), digest.data(), &out_len,
+                   EVP_sha384(), nullptr) != 1) {
+        throw_openssl_error("EVP_Digest (SHA-384 over SPKI)");
+    }
+    digest.resize(out_len);
+    return digest;
 }
 
 }  // namespace tee_anchor::pki

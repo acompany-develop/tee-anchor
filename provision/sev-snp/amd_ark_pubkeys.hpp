@@ -1,0 +1,73 @@
+#pragma once
+//
+// AMD SEV ARK (AMD Root Key) の公開鍵ピン（信頼アンカー）。
+//
+// 出典: AMD KDS の cert_chain エンドポイントから取得した各世代の ARK。
+//   https://kdsintf.amd.com/vcek/v1/Milan/cert_chain
+//   https://kdsintf.amd.com/vcek/v1/Genoa/cert_chain
+//   https://kdsintf.amd.com/vcek/v1/Turin/cert_chain
+// cert_chain は [ASK, ARK] を返し、ARK は自己署名 root (CN=ARK-<世代>)。
+//
+// 形式: ARK の SubjectPublicKeyInfo(DER) の SHA-384 ダイジェスト (48 バイト)。
+//   ARK は RSA-4096 で生鍵が嵩むため、SGX の Intel root (P-256, 生 EC point を
+//   bit-for-bit 比較) とは異なり、本ファイルではダイジェストを pin する。
+//   ダイジェストは pki::pubkey_spki_sha384() で算出するのと同じ値。
+//
+// 役割: 検証そのものは snpguest (verify certs / verify attestation) に委譲するが、
+//   snpguest は KDS から取得した ARK を「自己署名 root だから」信頼するだけで
+//   既知の AMD root への pin はしない。そこで TEE Anchor 側で、チェーン同梱の
+//   ARK の公開鍵がここに列挙した既知値のいずれかと一致するかを追加で照合する。
+//   これにより SGX 経路と同じ「信頼根はコードが握る」プロパティを保つ。
+//
+// 確認: Milan の値は実機 (GCP / EPYC 7B13) で取得した certs/ark.pem の
+//   公開鍵ダイジェストとも bit-for-bit 一致することを確認済み。
+//   いずれも本番投入前に AMD 公式公開鍵とのクロスチェックを推奨。
+//
+#include <algorithm>
+#include <array>
+#include <cstdint>
+#include <string>
+#include <vector>
+
+namespace tee_anchor::snp {
+
+struct ArkPin {
+    const char*               generation;  // "Milan" / "Genoa" / "Turin"
+    std::array<uint8_t, 48>   spki_sha384;
+};
+
+inline constexpr std::array<ArkPin, 3> kAmdArkPins = {{
+    {"Milan", {
+        0x12, 0x49, 0xf6, 0x7f, 0x15, 0xcf, 0x22, 0x9a, 0x40, 0x69, 0x19, 0x5e,
+        0x1a, 0x9c, 0xe5, 0x37, 0xd1, 0x76, 0x5e, 0xf7, 0x06, 0xa1, 0xf4, 0xa1,
+        0x23, 0xc3, 0x6b, 0xe9, 0x51, 0x87, 0x86, 0x51, 0x5d, 0x25, 0xec, 0xc0,
+        0x07, 0xf3, 0x66, 0xb5, 0x64, 0xd2, 0xb3, 0xf3, 0x1c, 0x48, 0x08, 0x2e,
+    }},
+    {"Genoa", {
+        0x32, 0xab, 0x53, 0xa6, 0xce, 0x5e, 0xc1, 0x49, 0x26, 0x20, 0x73, 0x96,
+        0xe5, 0xc4, 0x75, 0xae, 0x76, 0x8a, 0x6a, 0x98, 0x31, 0xb7, 0xe8, 0x60,
+        0xb5, 0xac, 0xf2, 0xe1, 0xc1, 0xdf, 0xf2, 0x22, 0xbc, 0x5a, 0x8b, 0xfc,
+        0x43, 0xeb, 0x5e, 0x06, 0x39, 0x31, 0x89, 0xc1, 0xf2, 0x46, 0xd8, 0x80,
+    }},
+    {"Turin", {
+        0x34, 0x75, 0xf0, 0x8a, 0x97, 0x27, 0xf8, 0xac, 0x9a, 0x1d, 0xea, 0xea,
+        0x5f, 0x2a, 0x20, 0x97, 0xaa, 0x59, 0xd6, 0x4d, 0x05, 0xc2, 0xa6, 0x78,
+        0xc2, 0x29, 0xc8, 0x73, 0xe6, 0x35, 0x9d, 0x3a, 0x69, 0x26, 0x28, 0x7a,
+        0x2a, 0x22, 0xcd, 0x5f, 0x88, 0xa3, 0x85, 0xe3, 0x33, 0xa2, 0xfc, 0xc5,
+    }},
+}};
+
+// 与えられた ARK 公開鍵ダイジェスト(48B)が既知のいずれかに一致すればその世代名を、
+// 一致しなければ nullptr を返す。
+inline const char* match_ark_pin(const std::vector<uint8_t>& spki_sha384) {
+    if (spki_sha384.size() != 48) return nullptr;
+    for (const auto& pin : kAmdArkPins) {
+        if (std::equal(pin.spki_sha384.begin(), pin.spki_sha384.end(),
+                       spki_sha384.begin())) {
+            return pin.generation;
+        }
+    }
+    return nullptr;
+}
+
+}  // namespace tee_anchor::snp
