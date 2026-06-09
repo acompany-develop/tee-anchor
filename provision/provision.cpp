@@ -21,6 +21,7 @@
 #include "binding/chip_id_binding.hpp"
 #include "sev-snp/snp_provision.hpp"
 #include "sgx/sgx_provision.hpp"
+#include "tdx/tdx_provision.hpp"
 
 namespace tee_anchor::provision {
 
@@ -33,9 +34,10 @@ struct ChipIdResult {
     X509Ptr              leaf;      // PCK leaf (Subject pubkey の供給源)
 };
 
-ChipIdResult extract_chip_id_for_sgx(const std::string& quote_path) {
-    auto quote = read_file(quote_path);
-    auto chain = sgx::extract_pck_chain_from_quote(quote);
+// PCK 証明書チェーン(SGX/TDX 共通形式)から PPID を取り出して ChipIdResult を組む。
+// チェーン検証(verify_pck_chain)と PPID 抽出は SGX/TDX で完全に同一。差は
+// 「チェーンを Quote から取り出す方法」だけなので、そこは呼び出し側で済ませて渡す。
+ChipIdResult chip_id_from_pck_chain(std::vector<X509Ptr> chain, uint8_t tee_type) {
     X509* leaf_ptr = sgx::verify_pck_chain(chain);
 
     auto ppid = sgx::find_sgx_extension_octet(leaf_ptr, sgx::OID_SGX_PPID);
@@ -47,7 +49,7 @@ ChipIdResult extract_chip_id_for_sgx(const std::string& quote_path) {
     bool all_zero = true;
     for (uint8_t b : *ppid) { if (b) { all_zero = false; break; } }
     if (all_zero) {
-        // 暗号化/redacted PPID の可能性。Phase 1 では設計上 plaintext 前提のため警告。
+        // 暗号化/redacted PPID の可能性。設計上 plaintext 前提のため警告。
         std::fprintf(stderr,
             "[warn] PPID is all-zero; PCK cert may carry an encrypted/redacted "
             "PPID. Proceeding, but the resulting endorsement may not bind a "
@@ -59,7 +61,21 @@ ChipIdResult extract_chip_id_for_sgx(const std::string& quote_path) {
     for (auto& c : chain) {
         if (c.get() == leaf_ptr) { leaf_owned = std::move(c); break; }
     }
-    return ChipIdResult{*ppid, binding::kTeeTypeSgx, std::move(leaf_owned)};
+    return ChipIdResult{*ppid, tee_type, std::move(leaf_owned)};
+}
+
+ChipIdResult extract_chip_id_for_sgx(const std::string& quote_path) {
+    auto quote = read_file(quote_path);
+    return chip_id_from_pck_chain(sgx::extract_pck_chain_from_quote(quote),
+                                  binding::kTeeTypeSgx);
+}
+
+ChipIdResult extract_chip_id_for_tdx(const std::string& quote_path) {
+    // SGX とほぼ同じ。差は TD Quote のフレーミング(v4/v5)と二重ネストした
+    // Certification Data の降り方だけで、それは tdx::extract_pck_chain_from_quote が吸収する。
+    auto quote = read_file(quote_path);
+    return chip_id_from_pck_chain(tdx::extract_pck_chain_from_quote(quote),
+                                  binding::kTeeTypeTdx);
 }
 
 ChipIdResult extract_chip_id_for_snp(const ProvisionArgs& args) {
@@ -75,10 +91,8 @@ ChipIdResult extract_chip_id_for_snp(const ProvisionArgs& args) {
 
 ChipIdResult extract_chip_id(const ProvisionArgs& args) {
     if (args.tee_type == "sgx") return extract_chip_id_for_sgx(args.quote_path);
+    if (args.tee_type == "tdx") return extract_chip_id_for_tdx(args.quote_path);
     if (args.tee_type == "snp") return extract_chip_id_for_snp(args);
-    if (args.tee_type == "tdx") {
-        throw TeeAnchorError("--tee-type tdx is not implemented yet");
-    }
     throw TeeAnchorError("unknown --tee-type: " + args.tee_type);
 }
 
@@ -95,8 +109,8 @@ void run_provision(const ProvisionArgs& args) {
     auto require = [](const std::string& v, const char* name) {
         if (v.empty()) throw TeeAnchorError(std::string(name) + " is required");
     };
-    // TEE 種別ごとに証拠の入力が異なる (SGX: Quote 単体 / SNP: Report + 証明書dir)。
-    if (args.tee_type == "sgx") {
+    // TEE 種別ごとに証拠の入力が異なる (SGX/TDX: Quote 単体 / SNP: Report + 証明書dir)。
+    if (args.tee_type == "sgx" || args.tee_type == "tdx") {
         require(args.quote_path, "--quote");
     } else if (args.tee_type == "snp") {
         require(args.report_path, "--report");
@@ -223,6 +237,7 @@ int cli_provision(int argc, char** argv) {
                 std::printf(
                     "Usage:\n"
                     "  tee-anchor provision --tee-type sgx --quote <file> --ca-key <file> --ca-cert <file> --out <file> [options]\n"
+                    "  tee-anchor provision --tee-type tdx --quote <file> --ca-key <file> --ca-cert <file> --out <file> [options]\n"
                     "  tee-anchor provision --tee-type snp --report <file> --certs <dir> --ca-key <file> --ca-cert <file> --out <file> [options]\n"
                     "\n"
                     "Common options:\n"
@@ -231,10 +246,10 @@ int cli_provision(int argc, char** argv) {
                     "  --out <file>           (required) output endorsement cert (PEM)\n"
                     "  --subject <DN>         endorsement cert subject DN (default: auto from Chip ID)\n"
                     "  --validity-days <N>    endorsement validity in days (default: 365)\n"
-                    "  --tee-type <sgx|snp>   TEE type (default: sgx)\n"
+                    "  --tee-type <sgx|tdx|snp>  TEE type (default: sgx)\n"
                     "\n"
-                    "SGX options (--tee-type sgx):\n"
-                    "  --quote <file>         (required) SGX Quote (binary, e.g. quote.dat)\n"
+                    "SGX/TDX options (--tee-type sgx | tdx):\n"
+                    "  --quote <file>         (required) SGX Quote or TD Quote (binary, e.g. quote.dat)\n"
                     "\n"
                     "SEV-SNP options (--tee-type snp):\n"
                     "  --report <file>        (required) SNP attestation report (binary, report.bin)\n"

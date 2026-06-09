@@ -5,6 +5,8 @@
 //   ベンダー証拠検証 → 組織 chain 検証 → Chip ID bit-for-bit 照合 を行う。
 //
 //   SGX: 証拠 = Quote。PCK chain を Intel root pubkey で検証し PPID を抽出。
+//   TDX: 証拠 = TD Quote。SGX と同じ(チェーン検証/PPID 抽出は共通)。TD Quote の
+//        v4/v5 フレーミングと二重ネスト Cert Data のパースだけが TDX 固有。
 //   SNP: 証拠 = Report + VCEK チェーン。ARK pin + snpguest 検証し CHIP_ID を抽出。
 //
 // exit code は design.md 準拠:

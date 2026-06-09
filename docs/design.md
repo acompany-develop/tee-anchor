@@ -58,6 +58,22 @@ Phase 1 の root cert は `BasicConstraints CA:TRUE` を pathLenConstraint **な
   - 論文の脅威モデル説明上も「Chip ID = PPID」という一行で済む方が清潔
 - 環境差で PPID が暗号化形式 / 0 埋めで提供される場合のフォールバック（PCK leaf の Subject Key Identifier 等）は Phase 2 以降で検討。実装上は all-zero PPID を検知時に警告する。
 
+#### TDX 固有: TD Quote のパース（実装済 / provision）
+
+PCK 証明書・PPID・SGX Extension・チェーン検証（Intel SGX Root CA 公開鍵 pin）は **SGX と完全に共通**で、`sgx::verify_pck_chain` / `sgx::find_sgx_extension_octet` をそのまま再利用する。TDX 固有なのは **TD Quote のバイナリ構造から PCK チェーンを取り出す部分だけ**（`provision/tdx/tdx_provision.cpp`）。
+
+差分は 2 点:
+
+1. **signature_data の開始オフセットが version で変わる**
+   - v4: `Header(48) | TD report body(584 固定) | sig_len(u32) | sig_data`（`report_base = 48`）
+   - v5: `Header(48) | body_type(u16) | body_size(u32) | body | sig_len(u32) | sig_data`（`report_base = 54`、+6 バイトの body descriptor）
+   - v5 は body 長が明示されるためそれを読む。TD report 1.5（648B）は v5 で `body_type=3` として運ばれ、v4 には現れない（Humane-RAFW-TDX も v4 を `report_base=48` 固定で扱う）。
+2. **PCK チェーンが二重ネスト**: `sig_data = sig(64) | attest_pub_key(64) | cert_data{ type=6 (QE_REPORT_CERTIFICATION_DATA): qe_report(384) | qe_report_sig(64) | qe_auth_data | cert_data{ type=5 (PCK_CERT_CHAIN): PCK PEM チェーン } }`。SGX(v3) は type=5 が `sig_data` 直下にあるのに対し、TDX は外側 type=6 の中に内側 type=5 が入る。
+
+パーサは外側 type=6 本体の終端が `sig_data` 終端と一致し、内側 type=5 本体もそこで閉じる、という**自己整合性**を要求する（GCP の TD Quote は固定長 8000B バッファで末尾がゼロ埋めのため、ファイル長ではなく宣言サイズでパースする）。`tee_type != 0x81` の Quote（SGX 等）は明示的に拒否する。
+
+> 実機検証: GCP Confidential VM (TDX) が返す v4 Quote で provision を end-to-end 確認済み（PPID 16B 抽出 → ChipIdBinding `teeType=tdx(1)` 発行）。v5 は仕様（report_base=54 + 同一 sig_data 構造）に基づく実装で、構造の自己整合性チェックで保護している。
+
 ### AMD SEV-SNP（実装済 / provision のみ）
 
 SGX/TDX と異なり、**Chip ID が attestation 本体（署名対象）に含まれる**ため、証明書ではなく Report から抽出する。
@@ -138,17 +154,17 @@ Phase 1 では DER エンコード済みのバイト列を OCTET STRING にそ�
 - `--out <file>` (required): 出力先（組織エンドースメント証明書、PEM）
 - `--subject <DN>`: 発行する証明書の Subject DN（省略時は Chip ID から自動生成）
 - `--validity-days <N>`: 有効期限（デフォルト 365）
-- `--tee-type <sgx|snp>`: TEE 種別（デフォルト `sgx`）
+- `--tee-type <sgx|tdx|snp>`: TEE 種別（デフォルト `sgx`）
 
-SGX 用引数（`--tee-type sgx`）：
-- `--quote <file>` (required): 入力する Quote（バイナリ、`quote.dat`）
+SGX / TDX 用引数（`--tee-type sgx | tdx`）：
+- `--quote <file>` (required): 入力する Quote（バイナリ、`quote.dat`）。SGX Quote / TD Quote のどちらでも可
 
 SEV-SNP 用引数（`--tee-type snp`）：
 - `--report <file>` (required): Attestation Report（バイナリ、`report.bin`）
 - `--certs <dir>` (required): `ark.pem` / `ask.pem` / `vcek.pem` を含むディレクトリ（snpguest fetch で取得）
 - `--snpguest <path>`: snpguest 実行ファイル（省略時は PATH から探索）
 
-設計判断（SGX）: 入力は `quote.dat` 1 つに統一する。Quote の Certification Data（`cert_key_type == 5`）に PCK 証明書チェーンが内包されており、別途 PCS / PCCS から PCK 証明書を取得する必要がないため。
+設計判断（SGX/TDX）: 入力は `quote.dat` 1 つに統一する。Quote の Certification Data に PCK 証明書チェーンが内包されており（SGX: `cert_key_type==5` / TDX: 外側 `type=6` の中の内側 `type=5`）、別途 PCS / PCCS から PCK 証明書を取得する必要がないため。
 設計判断（SNP）: SNP の Report には証明書チェーンが含まれないため、KDS から取得した VCEK チェーン（`certs/`）を Report と併せて入力に取る。
 
 処理（SGX）：
@@ -161,6 +177,10 @@ SEV-SNP 用引数（`--tee-type snp`）：
 6. ChipIdBinding extension（Critical、`chipId = PPID`）を追加
 7. 組織 CA 秘密鍵で署名
 8. PEM 形式で出力
+
+処理（TDX）：SGX とほぼ同一で、差は 1 のみ。
+1. TD Quote をロードし version(v4/v5) に応じて signature_data 位置を決め、二重ネスト（外側 `type=6` → 内側 `type=5`）を辿って PCK 証明書チェーンを抽出（`tee_type != 0x81` は拒否）
+2.〜8. SGX と同一（チェーン検証 → PPID 抽出 → endorsement 発行。`teeType = tdx(1)`）
 
 処理（SNP）：
 1. Report をロードしヘッダを検証（長さ 1184B、VERSION ∈ 2..5、SIGNATURE_ALGO == ECDSA-P384/SHA-384）
@@ -182,10 +202,10 @@ provision と同じく証拠の入力が TEE 種別で異なる。検証は「(1
 - `--org-cert <file>` (required): 組織エンドースメント証明書（PEM）
 - `--org-ca <file>` (required): 組織 Root CA 証明書（PEM、trust anchor）
 - `--crl <file>`: 組織 CRL（PEM、任意。指定時のみ失効チェックを行い、失効なら exit 24）
-- `--tee-type <sgx|snp>`: TEE 種別（デフォルト `sgx`）
+- `--tee-type <sgx|tdx|snp>`: TEE 種別（デフォルト `sgx`）
 
-SGX 用引数（`--tee-type sgx`）：
-- `--quote <file>` (required): SGX Quote（バイナリ）
+SGX / TDX 用引数（`--tee-type sgx | tdx`）：
+- `--quote <file>` (required): SGX Quote / TD Quote（バイナリ）
 
 SEV-SNP 用引数（`--tee-type snp`）：
 - `--report <file>` (required): SNP Attestation Report（バイナリ、`report.bin`）
@@ -197,6 +217,8 @@ SEV-SNP 用引数（`--tee-type snp`）：
 2. 組織エンドースメント証明書を組織 CA で検証（ChipIdBinding は Critical のため `X509_V_FLAG_IGNORE_CRITICAL`、`--crl` 指定時は `X509_V_FLAG_CRL_CHECK`）
 3. ChipIdBinding の `chipId` と PPID を **bit-for-bit 一致確認**
 4. 全成功で exit 0、各失敗ステップに応じた非ゼロ exit code
+
+処理（TDX）：SGX と同一で、差は 1 の Quote パースのみ（v4/v5 フレーミング判定 + 外側 type=6 → 内側 type=5 の降下。`provision/tdx/tdx_provision.cpp` を verify でも再利用）。2.〜4. は SGX と完全共通（exit code も同じ）。
 
 処理（SNP）：
 1. Report ヘッダ検証 → ARK pin 照合 → **snpguest** で `verify certs` + `verify attestation` → 通過後に CHIP_ID(0x1A0, 64B) を抽出（provision と同一経路を再利用）

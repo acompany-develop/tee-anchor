@@ -22,6 +22,7 @@
 #include "binding/chip_id_binding.hpp"
 #include "sev-snp/snp_provision.hpp"
 #include "sgx/sgx_provision.hpp"
+#include "tdx/tdx_provision.hpp"
 
 namespace tee_anchor::verify {
 
@@ -34,20 +35,31 @@ constexpr int kExitMismatch    = 22;
 constexpr int kExitRevoked     = 24;
 constexpr int kExitInternal    = 30;
 
+// PCK 証明書チェーン(SGX/TDX 共通形式)を検証し、PPID を取り出す。
+// チェーン検証(Intel SGX Root CA pin)と PPID 抽出は SGX/TDX で完全に同一。
+std::vector<uint8_t> ppid_from_pck_chain(const std::vector<X509Ptr>& chain) {
+    X509* leaf = sgx::verify_pck_chain(chain);
+    auto ppid = sgx::find_sgx_extension_octet(leaf, sgx::OID_SGX_PPID);
+    if (!ppid) {
+        throw TeeAnchorError("PPID (OID " + std::string(sgx::OID_SGX_PPID) +
+                             ") not found in PCK leaf");
+    }
+    return *ppid;
+}
+
 // attestation 証拠 (Quote / Report+VCEK) をベンダー検証し、Chip ID を取り出す。
 // TEE 種別ごとに検証経路が異なるが、いずれも「検証通過後にだけ Chip ID を返す」。
 // 検証失敗時は TeeAnchorError (呼び出し側で exit 20 に変換)。
 std::vector<uint8_t> verify_evidence_and_extract_chip_id(const VerifyArgs& args) {
     if (args.tee_type == "sgx") {
         auto quote = read_file(args.quote_path);
-        auto chain = sgx::extract_pck_chain_from_quote(quote);
-        X509* leaf = sgx::verify_pck_chain(chain);
-        auto ppid = sgx::find_sgx_extension_octet(leaf, sgx::OID_SGX_PPID);
-        if (!ppid) {
-            throw TeeAnchorError("PPID (OID " + std::string(sgx::OID_SGX_PPID) +
-                                 ") not found in PCK leaf");
-        }
-        return *ppid;
+        return ppid_from_pck_chain(sgx::extract_pck_chain_from_quote(quote));
+    }
+    if (args.tee_type == "tdx") {
+        // SGX とほぼ同じ。差は TD Quote のフレーミング(v4/v5)と二重ネストした
+        // Certification Data の降り方だけで、それは tdx::extract_pck_chain_from_quote が吸収する。
+        auto quote = read_file(args.quote_path);
+        return ppid_from_pck_chain(tdx::extract_pck_chain_from_quote(quote));
     }
     if (args.tee_type == "snp") {
         // provision と同じ検証経路を再利用 (ARK pin + snpguest verify certs/attestation)。
@@ -126,8 +138,8 @@ int run_verify(const VerifyArgs& args) {
     try {
         require(args.org_cert_path, "--org-cert");
         require(args.org_ca_path,   "--org-ca");
-        // TEE 種別ごとに証拠の入力が異なる (SGX: Quote / SNP: Report + 証明書dir)。
-        if (args.tee_type == "sgx") {
+        // TEE 種別ごとに証拠の入力が異なる (SGX/TDX: Quote / SNP: Report + 証明書dir)。
+        if (args.tee_type == "sgx" || args.tee_type == "tdx") {
             require(args.quote_path, "--quote");
         } else if (args.tee_type == "snp") {
             require(args.report_path, "--report");
@@ -265,6 +277,7 @@ int cli_verify(int argc, char** argv) {
                 std::printf(
                     "Usage:\n"
                     "  tee-anchor verify --tee-type sgx --quote <file> --org-cert <file> --org-ca <file> [options]\n"
+                    "  tee-anchor verify --tee-type tdx --quote <file> --org-cert <file> --org-ca <file> [options]\n"
                     "  tee-anchor verify --tee-type snp --report <file> --certs <dir> --org-cert <file> --org-ca <file> [options]\n"
                     "\n"
                     "Common options:\n"
@@ -272,10 +285,10 @@ int cli_verify(int argc, char** argv) {
                     "  --org-ca <file>        (required) organization root CA cert (PEM, trust anchor)\n"
                     "  --crl <file>           organization CRL (PEM). When given, endorsement is also\n"
                     "                         checked against this CRL (exit 24 if revoked).\n"
-                    "  --tee-type <sgx|snp>   TEE type (default: sgx)\n"
+                    "  --tee-type <sgx|tdx|snp>  TEE type (default: sgx)\n"
                     "\n"
-                    "SGX options (--tee-type sgx):\n"
-                    "  --quote <file>         (required) SGX Quote (binary, quote.dat)\n"
+                    "SGX/TDX options (--tee-type sgx | tdx):\n"
+                    "  --quote <file>         (required) SGX Quote or TD Quote (binary, quote.dat)\n"
                     "\n"
                     "SEV-SNP options (--tee-type snp):\n"
                     "  --report <file>        (required) SNP attestation report (binary, report.bin)\n"
@@ -285,7 +298,7 @@ int cli_verify(int argc, char** argv) {
                     "\n"
                     "Exit codes:\n"
                     "  0   all checks passed\n"
-                    " 20   attestation evidence verification failed (SGX: PCK chain / SNP: VCEK chain or report signature)\n"
+                    " 20   attestation evidence verification failed (SGX/TDX: PCK chain / SNP: VCEK chain or report signature)\n"
                     " 21   organization endorsement chain verification failed\n"
                     " 22   Chip ID mismatch (= proxy attack detected)\n"
                     " 24   endorsement revoked by organization CRL\n"

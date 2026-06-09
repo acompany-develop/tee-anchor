@@ -22,10 +22,11 @@
 sudo apt-get install -y build-essential libssl-dev
 ```
 
-> SGX 経路は OpenSSL のみで自己完結します。**SEV-SNP の provision** は、ベンダー検証
-> （VCEK チェーン + Report 署名）を AMD 製ツール [snpguest](https://github.com/virtee/snpguest)
-> に委譲するため、SNP を使う場合のみ追加で snpguest が必要です（導入は
-> `provision/sev-snp/snp-sample/` を参照）。TDX は今後追加予定。
+> **SGX / TDX の provision** は OpenSSL のみで自己完結します（Quote 内蔵の PCK 証明書から
+> Chip ID を抽出）。**SEV-SNP の provision** は、ベンダー検証（VCEK チェーン + Report 署名）を
+> AMD 製ツール [snpguest](https://github.com/virtee/snpguest) に委譲するため、SNP を使う場合のみ
+> 追加で snpguest が必要です（導入は `provision/sev-snp/snp-sample/` を参照）。
+> TDX の Quote 取得サンプルは `provision/tdx/tdx_sample/` を参照。
 
 ---
 
@@ -45,8 +46,8 @@ make clean      # 生成物を削除
 | サブコマンド | 役割 |
 |---|---|
 | `ca-init`   | 組織 Root CA 鍵 + 自己署名証明書を発行 |
-| `provision` | 証拠から Chip ID を抽出 → 組織 CA で署名した endorsement 証明書を発行 (SGX: Quote→PPID / SNP: Report→CHIP_ID) |
-| `verify`    | 証拠 + endorsement + 組織 CA で Chip ID binding を検証 (SGX: Quote / SNP: Report+VCEK、任意で CRL チェック) |
+| `provision` | 証拠から Chip ID を抽出 → 組織 CA で署名した endorsement 証明書を発行 (SGX/TDX: Quote→PPID / SNP: Report→CHIP_ID) |
+| `verify`    | 証拠 + endorsement + 組織 CA で Chip ID binding を検証 (SGX/TDX: Quote / SNP: Report+VCEK、任意で CRL チェック) |
 | `revoke`    | endorsement の serial を失効リスト DB に追加 |
 | `crl-issue` | DB から X.509 CRL を発行 |
 
@@ -114,6 +115,43 @@ echo "exit=$?"   # → 24
 ```
 
 `--crl` は **任意指定**で、付けない verify は CRL チェックなしで動作します（後方互換）。
+
+### TDX の provision
+
+TDX は SGX とほぼ同じで、Chip ID（PPID）は TD Quote 内蔵の PCK 証明書から抽出します
+（SEV-SNP のように Report 本体からは取れません）。SGX との違いは TD Quote のバイナリ構造だけで、
+チェーン検証（Intel SGX Root CA pin）と PPID 抽出は SGX 実装をそのまま再利用しています。
+
+```sh
+# (TDX CVM 上で) TD Quote を取得（要 sudo: /dev/tdx_guest は root 専用）
+cd provision/tdx/tdx_sample
+sudo ./setup.sh        # 初回のみ: libtdx-attest 等を導入
+make && sudo ./get_quote   # quote.dat を生成
+cd -
+
+# TD Quote から PPID を抽出して endorsement を発行
+./tee-anchor provision --tee-type tdx \
+    --quote   provision/tdx/tdx_sample/quote.dat \
+    --ca-key  "$W/ca.key" \
+    --ca-cert "$W/ca.crt" \
+    --out     "$W/tdx_endorsement.crt"
+```
+
+発行した endorsement の検証も同じ Quote で行えます（exit code は SGX と共通）：
+
+```sh
+./tee-anchor verify --tee-type tdx \
+    --quote    provision/tdx/tdx_sample/quote.dat \
+    --org-cert "$W/tdx_endorsement.crt" \
+    --org-ca   "$W/ca.crt"
+echo "exit=$?"   # → 0
+```
+
+検証フロー: TD Quote パース → PCK チェーン検証（Intel SGX Root CA pin）→ PPID 抽出 →
+組織 chain 検証 → Chip ID bit-for-bit 照合（SGX と (2)(3) 共通）。TD Quote の v4/v5 で
+フレーミング（PCK チェーンのオフセット）が変わる点と、PCK チェーンが外側 `type=6` の中に
+内側 `type=5` として二重ネストされる点を吸収します。詳細は `docs/design.md` の
+「TDX 固有: TD Quote のパース」、Quote 取得は `provision/tdx/tdx_sample/README.md`。
 
 ### SEV-SNP の provision
 
@@ -202,6 +240,9 @@ tee-anchor/
 │   │   ├── sgx_provision.{hpp,cpp}      Quote パース + PCK chain 検証 + PPID 抽出
 │   │   ├── intel_sgx_root_pubkey.hpp    Intel SGX Root CA 公開鍵 (QvE と同値)
 │   │   └── sgx_sample/                  Quote 取得用ミニサンプル
+│   ├── tdx/
+│   │   ├── tdx_provision.{hpp,cpp}      TD Quote(v4/v5) パース + PCK chain 抽出 (検証/PPID は sgx 再利用)
+│   │   └── tdx_sample/                  TD Quote 取得サンプル (libtdx_attest)
 │   └── sev-snp/
 │       ├── snp_provision.{hpp,cpp}      Report パース + CHIP_ID 抽出 (検証は snpguest 委譲)
 │       ├── amd_ark_pubkeys.hpp          AMD ARK pin (Milan/Genoa/Turin の SPKI SHA-384)
