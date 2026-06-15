@@ -94,6 +94,24 @@ VCEK チェーン検証（ARK→ASK→VCEK）と Report 署名検証（VCEK が 
 
 > 注: SNP の verify サブコマンド対応は未実装（現状 provision のみ）。endorsement の Subject Public Key には SGX の PCK leaf と対称に **VCEK leaf の公開鍵**を流用する。
 
+### Arm CCA（実装済 / provision のみ）
+
+CCA には **X.509 が一切無い**。証拠は CBOR/COSE 形式の CCA Attestation Token で、Chip ID は SNP と同様に **token 本体（署名対象）に含まれる**。
+
+- **抽出元 = CCA Platform Token の `cca-platform-instance-id`（EAT claim 256, UEID）**。先頭 1 バイトが UEID type（`0x01`=RAND）、続いて 32 バイトの個体一意識別子（計 33B）。Platform Attestation Key (CPAK) の一意識別子であり、SGX の PPID / SNP の CHIP_ID に対応する「個体シリアル相当」。
+  - `cca-platform-implementation-id`（claim 2396）は**実装クラス共通値**（製品モデル相当）で、proxy 検出には使えないため Chip ID には採らない（SGX で FMSPC でなく PPID を選んだのと同じ判断）。
+- **token 構造**: 最上位は CBOR tag 399（RATS CCA token v01, EAT collection）の map で、`cca-platform-token`（key 44234）と `cca-realm-delegated-token`（key 44241）を持つ。各 token は COSE_Sign1（CBOR tag 18）。Platform Token は **CPAK が ES384（ECDSA P-384/SHA-384）で署名**。Platform と Realm は「Platform の `cca-platform-challenge` = Realm 公開鍵(RAK)のハッシュ」で結合される（Delegated Model）。
+
+#### ベンダー検証 = CPAK pin（`provision/cca/cca_cpak_pubkey.hpp`）
+
+CCA に証明書チェーンは無いため、SGX の Intel root pubkey / SNP の ARK と同様に **CPAK 公開鍵をコードに pin** し、Platform Token の COSE_Sign1 署名を OpenSSL（ES384）で直接検証する。
+
+- 検証フロー: **CPAK pin で COSE_Sign1(Platform Token) の署名検証 → 通過後に instance-id 抽出**。CBOR/COSE は新規ビルド依存を避けるため `common/cbor.hpp` の最小実装で扱う（この token 形状に必要な範囲のみ。Sig_structure を再構築し ECDSA 検証は OpenSSL）。
+- pin する CPAK は QEMU フルエミュレーション環境の **dev 鍵**：TF-A の `qemu_plat_attest_token.c` にハードコードされた静的 Platform Token（TF-M iat-verifier の `cca_example_platform_token.yaml`）を署名した鍵で、出どころは TF-M `iat-verifier/tests/data/cca_platform.pem`。veraison/ccatoken の testRMMCPAK と一致し、実機取得 token の署名からの ECDSA 公開鍵復元とも bit 一致を確認済み。
+- 実機 CCA では CPAK は CoRIM 等の endorsement で配布されるため、本 pin は **PoC（QEMU）専用**。realm token / platform↔realm binding の検証は instance-id 抽出には不要なので provision では行わない。
+
+> endorsement の Subject Public Key には、SGX の PCK leaf / SNP の VCEK leaf と対称に **CPAK 公開鍵**（= instance-id が指す Platform Attestation Key）を流用する。CCA の verify サブコマンド対応は未実装（現状 provision のみ）。
+
 ## X.509 拡張 OID 設計
 
 組織エンドースメント証明書には以下の Critical Extension を含める。
@@ -154,7 +172,7 @@ Phase 1 では DER エンコード済みのバイト列を OCTET STRING にそ�
 - `--out <file>` (required): 出力先（組織エンドースメント証明書、PEM）
 - `--subject <DN>`: 発行する証明書の Subject DN（省略時は Chip ID から自動生成）
 - `--validity-days <N>`: 有効期限（デフォルト 365）
-- `--tee-type <sgx|tdx|snp>`: TEE 種別（デフォルト `sgx`）
+- `--tee-type <sgx|tdx|snp|cca>`: TEE 種別（デフォルト `sgx`）
 
 SGX / TDX 用引数（`--tee-type sgx | tdx`）：
 - `--quote <file>` (required): 入力する Quote（バイナリ、`quote.dat`）。SGX Quote / TD Quote のどちらでも可
@@ -164,8 +182,12 @@ SEV-SNP 用引数（`--tee-type snp`）：
 - `--certs <dir>` (required): `ark.pem` / `ask.pem` / `vcek.pem` を含むディレクトリ（snpguest fetch で取得）
 - `--snpguest <path>`: snpguest 実行ファイル（省略時は PATH から探索）
 
+Arm CCA 用引数（`--tee-type cca`）：
+- `--token <file>` (required): CCA Attestation Token（CBOR、`cca-token.cbor`）
+
 設計判断（SGX/TDX）: 入力は `quote.dat` 1 つに統一する。Quote の Certification Data に PCK 証明書チェーンが内包されており（SGX: `cert_key_type==5` / TDX: 外側 `type=6` の中の内側 `type=5`）、別途 PCS / PCCS から PCK 証明書を取得する必要がないため。
 設計判断（SNP）: SNP の Report には証明書チェーンが含まれないため、KDS から取得した VCEK チェーン（`certs/`）を Report と併せて入力に取る。
+設計判断（CCA）: token 自体に Platform/Realm の COSE_Sign1 が含まれるため入力は `cca-token.cbor` 1 つ。信頼根の CPAK は token 外（コードに pin）。
 
 処理（SGX）：
 1. Quote をロードしバイナリ構造をパース、Certification Data から PCK 証明書チェーンを抽出
@@ -192,6 +214,16 @@ SEV-SNP 用引数（`--tee-type snp`）：
 7. 組織 CA 秘密鍵で署名
 8. PEM 形式で出力
 
+処理（CCA）：SNP と同様に Chip ID は token 本体から取り、ベンダー検証は CPAK pin で行う。
+1. `cca-token.cbor` をロードし CBOR をパース（最上位 tag 399 の map → `cca-platform-token`(44234) の COSE_Sign1）
+2. COSE_Sign1 の alg が ES384(-35) であることを確認し、Sig_structure（`["Signature1", protected, b"", payload]`）を再構築
+3. **ハードコードした CPAK 公開鍵**（P-384）で Sig_structure に対する署名を検証（raw r||s → DER 変換のうえ OpenSSL `EVP_DigestVerify`）
+4. 検証通過後に payload(claims) から `cca-platform-instance-id`(256, 33B) を抽出
+5. 新規鍵ペアは生成せず、CPAK の公開鍵を Subject Public Key として使用
+6. ChipIdBinding extension（Critical、`teeType = armCca(3)`、`chipId = instance-id`）を追加
+7. 組織 CA 秘密鍵で署名
+8. PEM 形式で出力
+
 CRL は本サブコマンドでは確認しない。理由は本ドキュメントの「CRL 設計」節を参照。
 
 ### `tee-anchor verify`
@@ -202,7 +234,7 @@ provision と同じく証拠の入力が TEE 種別で異なる。検証は「(1
 - `--org-cert <file>` (required): 組織エンドースメント証明書（PEM）
 - `--org-ca <file>` (required): 組織 Root CA 証明書（PEM、trust anchor）
 - `--crl <file>`: 組織 CRL（PEM、任意。指定時のみ失効チェックを行い、失効なら exit 24）
-- `--tee-type <sgx|tdx|snp>`: TEE 種別（デフォルト `sgx`）
+- `--tee-type <sgx|tdx|snp|cca>`: TEE 種別（デフォルト `sgx`）
 
 SGX / TDX 用引数（`--tee-type sgx | tdx`）：
 - `--quote <file>` (required): SGX Quote / TD Quote（バイナリ）
@@ -211,6 +243,9 @@ SEV-SNP 用引数（`--tee-type snp`）：
 - `--report <file>` (required): SNP Attestation Report（バイナリ、`report.bin`）
 - `--certs <dir>` (required): `ark.pem` / `ask.pem` / `vcek.pem` を含むディレクトリ
 - `--snpguest <path>`: snpguest 実行ファイル（省略時は PATH から探索）
+
+Arm CCA 用引数（`--tee-type cca`）：
+- `--token <file>` (required): CCA Attestation Token（CBOR、`cca-token.cbor`）
 
 処理（SGX）：
 1. Quote をパース、CERT_DATA から PCK Cert チェーンを抽出 → Intel Root CA(ハードコード公開鍵)で検証 → PPID を抽出
@@ -226,7 +261,13 @@ SEV-SNP 用引数（`--tee-type snp`）：
 3. ChipIdBinding の `chipId` と CHIP_ID を **bit-for-bit 一致確認**
 4. 全成功で exit 0
 
-> 注: provision と同様、Quote/Report の署名・チェーン検証はベンダー側（SGX: 自前 PCK 検証 or 実運用では QvL / SNP: snpguest）に閉じ、TEE Anchor のコア責務は組織 endorsement と Chip ID binding の照合にある。
+処理（CCA）：SNP と同様に (1) を provision と同一経路で再利用する。
+1. `cca-token.cbor` をパース → CPAK pin で Platform Token(COSE_Sign1/ES384) の署名を検証 → 通過後に instance-id(claim 256, 33B) を抽出（`provision/cca/cca_provision.cpp` の `verify_and_extract` を verify でも再利用）
+2. 組織エンドースメント証明書を組織 CA で検証（SGX と共通）
+3. ChipIdBinding の `chipId` と instance-id を **bit-for-bit 一致確認**
+4. 全成功で exit 0（exit code も他 TEE と共通：CPAK pin/COSE 署名失敗は 20）
+
+> 注: provision と同様、Quote/Report/Token の署名・チェーン検証はベンダー側（SGX: 自前 PCK 検証 or 実運用では QvL / SNP: snpguest / CCA: CPAK pin で COSE 検証）に閉じ、TEE Anchor のコア責務は組織 endorsement と Chip ID binding の照合にある。
 
 ### Exit Code 設計
 

@@ -8,6 +8,8 @@
 //   TDX: 証拠 = TD Quote。SGX と同じ(チェーン検証/PPID 抽出は共通)。TD Quote の
 //        v4/v5 フレーミングと二重ネスト Cert Data のパースだけが TDX 固有。
 //   SNP: 証拠 = Report + VCEK チェーン。ARK pin + snpguest 検証し CHIP_ID を抽出。
+//   CCA: 証拠 = CCA token。CPAK pin で Platform Token(COSE_Sign1/ES384)を検証し
+//        instance-id を抽出。(2)(3) は他 TEE と共通。
 //
 // exit code は design.md 準拠:
 //   0   全検証成功
@@ -32,11 +34,14 @@ struct VerifyArgs {
     std::string certs_dir;        // --certs  (tee-type=snp; ark.pem/ask.pem/vcek.pem)
     std::string snpguest_bin;     // --snpguest (省略時は PATH から探索)
 
+    // Arm CCA 用証拠
+    std::string token_path;       // --token (tee-type=cca; cca-token.cbor)
+
     // 共通
     std::string org_cert_path;    // --org-cert
     std::string org_ca_path;      // --org-ca
     std::string crl_path;         // --crl (任意。指定時は CRL チェック有効)
-    std::string tee_type = "sgx"; // --tee-type (sgx / snp)
+    std::string tee_type = "sgx"; // --tee-type (sgx / tdx / snp / cca)
 };
 
 // 戻り値は exit code (0/20/21/22/30)。例外は内部で全て exit code に変換する。

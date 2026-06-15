@@ -1,0 +1,58 @@
+#pragma once
+//
+// pin した CCA Platform Attestation Key (CPAK) 公開鍵。
+//
+// Intel SGX Root CA 公開鍵 (intel_sgx_root_pubkey.hpp) や AMD ARK
+// (amd_ark_pubkeys.hpp) の pin と同じ役割：CCA Platform Token (COSE_Sign1) の
+// 信頼根として、TEE Anchor がコードに焼き込んだ既知の公開鍵で署名検証する。
+//
+// 値の出どころ（QEMU フルエミュレーション環境の dev CPAK）:
+//   - QEMU/TF-A の Platform Token は plat/qemu/common/qemu_plat_attest_token.c に
+//     ハードコードされた静的 COSE_Sign1（TF-M iat-verifier の
+//     cca_example_platform_token.yaml の CBOR シリアライズ）。
+//   - それを署名した CPAK 公開鍵は TF-M tf-m-tools の
+//     iat-verifier/tests/data/cca_platform.pem。
+//   - 本値は veraison/ccatoken の testRMMCPAK(JWK) と一致し、かつ実機で取得した
+//     cca-token.cbor の COSE_Sign1 署名から ECDSA 公開鍵復元したものとも bit 一致
+//     することを確認済み（P-384, ES384）。
+//
+//   SPKI(SubjectPublicKeyInfo) DER, 120 bytes
+//   SHA-384(SPKI) = 998ce6e2213a18dcba6608d0d261ec2e70de7c9bc6ba5efb9058
+//                   3611e13f32839f447f9cadf704c6bc045369cbf8fa90
+//
+// 注意: これは「エミュレーション環境の固定 dev 鍵」であり実 HW の CPAK ではない。
+//       実機 CCA では CPAK は CoRIM 等の endorsement で配布される。本 pin は
+//       PoC（QEMU）専用で、将来は endorsement 取り込みに置き換える。
+//
+#include <cstdint>
+#include <vector>
+
+#include <openssl/x509.h>
+
+#include "error.hpp"
+#include "openssl_raii.hpp"
+
+namespace tee_anchor::cca {
+
+inline constexpr uint8_t kCpakSpkiDer[] = {
+    0x30, 0x76, 0x30, 0x10, 0x06, 0x07, 0x2a, 0x86, 0x48, 0xce, 0x3d, 0x02,
+    0x01, 0x06, 0x05, 0x2b, 0x81, 0x04, 0x00, 0x22, 0x03, 0x62, 0x00, 0x04,
+    0x21, 0x28, 0x67, 0xc5, 0x2e, 0x2b, 0x95, 0x08, 0xb0, 0xa4, 0x20, 0xa9,
+    0x05, 0x60, 0xf3, 0x94, 0xd2, 0xdf, 0xaa, 0x21, 0xbd, 0xd7, 0x51, 0x4f,
+    0xf1, 0xa9, 0x01, 0xaf, 0xe7, 0xe1, 0xf7, 0x8b, 0xb1, 0x1d, 0x4e, 0x66,
+    0xf8, 0xa8, 0xa3, 0x8a, 0xfa, 0x76, 0xaf, 0x6a, 0x31, 0xc4, 0xde, 0x8c,
+    0x84, 0xce, 0x2d, 0xaf, 0xc9, 0x96, 0x42, 0x58, 0xb5, 0x3f, 0xad, 0x71,
+    0x87, 0x74, 0xf4, 0x56, 0x20, 0xd1, 0x11, 0xb1, 0x76, 0xe8, 0x31, 0x8e,
+    0x11, 0x87, 0xdb, 0x02, 0x35, 0xa3, 0x18, 0xd3, 0x7b, 0xa5, 0x97, 0xfe,
+    0xe8, 0x0e, 0x0e, 0x4c, 0x76, 0x2a, 0x12, 0xbc, 0xb3, 0xea, 0x6e, 0xd4,
+};
+
+// pin した CPAK 公開鍵を EVP_PKEY として読み込む。
+inline EvpPkeyPtr load_pinned_cpak() {
+    const unsigned char* p = kCpakSpkiDer;
+    EvpPkeyPtr pkey(d2i_PUBKEY(nullptr, &p, static_cast<long>(sizeof(kCpakSpkiDer))));
+    if (!pkey) throw_openssl_error("d2i_PUBKEY (pinned CPAK)");
+    return pkey;
+}
+
+}  // namespace tee_anchor::cca

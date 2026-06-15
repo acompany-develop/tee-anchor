@@ -20,6 +20,7 @@
 #include "pki_util.hpp"
 
 #include "binding/chip_id_binding.hpp"
+#include "cca/cca_provision.hpp"
 #include "sev-snp/snp_provision.hpp"
 #include "sgx/sgx_provision.hpp"
 #include "tdx/tdx_provision.hpp"
@@ -67,6 +68,12 @@ std::vector<uint8_t> verify_evidence_and_extract_chip_id(const VerifyArgs& args)
         snp::SnpVerifyResult r =
             snp::verify_and_extract(args.report_path, args.certs_dir, args.snpguest_bin);
         return std::move(r.chip_id);
+    }
+    if (args.tee_type == "cca") {
+        // provision と同じ検証経路を再利用 (CPAK pin で COSE_Sign1/ES384 検証)。
+        // verify では CPAK leaf は不要なので instance-id のみ受け取る。
+        cca::CcaVerifyResult r = cca::verify_and_extract(args.token_path);
+        return std::move(r.instance_id);
     }
     throw TeeAnchorError("unknown --tee-type: " + args.tee_type);
 }
@@ -125,6 +132,7 @@ uint8_t expected_tee_type(const std::string& s) {
     if (s == "sgx") return binding::kTeeTypeSgx;
     if (s == "tdx") return binding::kTeeTypeTdx;
     if (s == "snp") return binding::kTeeTypeSevSnp;
+    if (s == "cca") return binding::kTeeTypeArmCca;
     throw TeeAnchorError("unknown --tee-type: " + s);
 }
 
@@ -138,12 +146,14 @@ int run_verify(const VerifyArgs& args) {
     try {
         require(args.org_cert_path, "--org-cert");
         require(args.org_ca_path,   "--org-ca");
-        // TEE 種別ごとに証拠の入力が異なる (SGX/TDX: Quote / SNP: Report + 証明書dir)。
+        // TEE 種別ごとに証拠の入力が異なる (SGX/TDX: Quote / SNP: Report + 証明書dir / CCA: token)。
         if (args.tee_type == "sgx" || args.tee_type == "tdx") {
             require(args.quote_path, "--quote");
         } else if (args.tee_type == "snp") {
             require(args.report_path, "--report");
             require(args.certs_dir,   "--certs");
+        } else if (args.tee_type == "cca") {
+            require(args.token_path, "--token");
         } else {
             throw TeeAnchorError("unknown --tee-type: " + args.tee_type);
         }
@@ -266,6 +276,7 @@ int cli_verify(int argc, char** argv) {
         for (int i = 0; i < argc; ++i) {
             std::string a = argv[i];
             if      (a == "--quote")    args.quote_path    = need_value(i, "--quote");
+            else if (a == "--token")    args.token_path    = need_value(i, "--token");
             else if (a == "--report")   args.report_path   = need_value(i, "--report");
             else if (a == "--certs")    args.certs_dir     = need_value(i, "--certs");
             else if (a == "--snpguest") args.snpguest_bin  = need_value(i, "--snpguest");
@@ -279,13 +290,14 @@ int cli_verify(int argc, char** argv) {
                     "  tee-anchor verify --tee-type sgx --quote <file> --org-cert <file> --org-ca <file> [options]\n"
                     "  tee-anchor verify --tee-type tdx --quote <file> --org-cert <file> --org-ca <file> [options]\n"
                     "  tee-anchor verify --tee-type snp --report <file> --certs <dir> --org-cert <file> --org-ca <file> [options]\n"
+                    "  tee-anchor verify --tee-type cca --token <file> --org-cert <file> --org-ca <file> [options]\n"
                     "\n"
                     "Common options:\n"
                     "  --org-cert <file>      (required) organization endorsement cert (PEM)\n"
                     "  --org-ca <file>        (required) organization root CA cert (PEM, trust anchor)\n"
                     "  --crl <file>           organization CRL (PEM). When given, endorsement is also\n"
                     "                         checked against this CRL (exit 24 if revoked).\n"
-                    "  --tee-type <sgx|tdx|snp>  TEE type (default: sgx)\n"
+                    "  --tee-type <sgx|tdx|snp|cca>  TEE type (default: sgx)\n"
                     "\n"
                     "SGX/TDX options (--tee-type sgx | tdx):\n"
                     "  --quote <file>         (required) SGX Quote or TD Quote (binary, quote.dat)\n"
@@ -296,9 +308,12 @@ int cli_verify(int argc, char** argv) {
                     "  --snpguest <path>      snpguest binary used for chain/report verification\n"
                     "                         (default: looked up on PATH)\n"
                     "\n"
+                    "Arm CCA options (--tee-type cca):\n"
+                    "  --token <file>         (required) CCA attestation token (CBOR, cca-token.cbor)\n"
+                    "\n"
                     "Exit codes:\n"
                     "  0   all checks passed\n"
-                    " 20   attestation evidence verification failed (SGX/TDX: PCK chain / SNP: VCEK chain or report signature)\n"
+                    " 20   attestation evidence verification failed (SGX/TDX: PCK chain / SNP: VCEK chain or report signature / CCA: CPAK or COSE signature)\n"
                     " 21   organization endorsement chain verification failed\n"
                     " 22   Chip ID mismatch (= proxy attack detected)\n"
                     " 24   endorsement revoked by organization CRL\n"

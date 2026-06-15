@@ -19,6 +19,7 @@
 #include "pki_util.hpp"
 
 #include "binding/chip_id_binding.hpp"
+#include "cca/cca_provision.hpp"
 #include "sev-snp/snp_provision.hpp"
 #include "sgx/sgx_provision.hpp"
 #include "tdx/tdx_provision.hpp"
@@ -29,9 +30,10 @@ namespace {
 
 // ----- TEE 別 chip ID 抽出 -------------------------------------------------
 struct ChipIdResult {
-    std::vector<uint8_t> chip_id;   // PPID 等
-    uint8_t              tee_type;  // binding::kTeeTypeSgx 等
-    X509Ptr              leaf;      // PCK leaf (Subject pubkey の供給源)
+    std::vector<uint8_t> chip_id;        // PPID / CHIP_ID / instance-id 等
+    uint8_t              tee_type;       // binding::kTeeTypeSgx 等
+    EvpPkeyPtr           subject_pubkey; // endorsement の Subject pubkey の供給源
+                                         //   SGX/TDX: PCK leaf / SNP: VCEK leaf / CCA: CPAK
 };
 
 // PCK 証明書チェーン(SGX/TDX 共通形式)から PPID を取り出して ChipIdResult を組む。
@@ -56,12 +58,10 @@ ChipIdResult chip_id_from_pck_chain(std::vector<X509Ptr> chain, uint8_t tee_type
             "useful Chip ID.\n");
     }
 
-    // leaf の所有権を chain から取り出す (X509Ptr に移し替え)。
-    X509Ptr leaf_owned;
-    for (auto& c : chain) {
-        if (c.get() == leaf_ptr) { leaf_owned = std::move(c); break; }
-    }
-    return ChipIdResult{*ppid, tee_type, std::move(leaf_owned)};
+    // PCK leaf の公開鍵を Subject pubkey として取り出す（所有権付き参照）。
+    EvpPkeyPtr pub(X509_get_pubkey(leaf_ptr));
+    if (!pub) throw_openssl_error("X509_get_pubkey (PCK leaf)");
+    return ChipIdResult{*ppid, tee_type, std::move(pub)};
 }
 
 ChipIdResult extract_chip_id_for_sgx(const std::string& quote_path) {
@@ -86,13 +86,26 @@ ChipIdResult extract_chip_id_for_snp(const ProvisionArgs& args) {
     std::fprintf(stderr, "[info] SNP report verified (version %u, ARK=%s)\n",
                  r.version, r.generation);
     // SGX の PCK leaf と対称に、VCEK leaf の公開鍵を endorsement の Subject pubkey に使う。
-    return ChipIdResult{std::move(r.chip_id), binding::kTeeTypeSevSnp, std::move(r.vcek)};
+    EvpPkeyPtr pub(X509_get_pubkey(r.vcek.get()));
+    if (!pub) throw_openssl_error("X509_get_pubkey (VCEK leaf)");
+    return ChipIdResult{std::move(r.chip_id), binding::kTeeTypeSevSnp, std::move(pub)};
+}
+
+ChipIdResult extract_chip_id_for_cca(const std::string& token_path) {
+    // CPAK pin で Platform Token(COSE_Sign1/ES384) を検証し instance-id を抽出する。
+    // SGX/SNP が leaf 証明書の公開鍵を Subject pubkey に使うのと対称に、CCA では
+    // 検証に使った CPAK 公開鍵 (= instance-id が指す Platform Attestation Key) を使う。
+    cca::CcaVerifyResult r = cca::verify_and_extract(token_path);
+    std::fprintf(stderr, "[info] CCA platform token verified (CPAK pin OK, %zuB instance-id)\n",
+                 r.instance_id.size());
+    return ChipIdResult{std::move(r.instance_id), binding::kTeeTypeArmCca, std::move(r.cpak)};
 }
 
 ChipIdResult extract_chip_id(const ProvisionArgs& args) {
     if (args.tee_type == "sgx") return extract_chip_id_for_sgx(args.quote_path);
     if (args.tee_type == "tdx") return extract_chip_id_for_tdx(args.quote_path);
     if (args.tee_type == "snp") return extract_chip_id_for_snp(args);
+    if (args.tee_type == "cca") return extract_chip_id_for_cca(args.token_path);
     throw TeeAnchorError("unknown --tee-type: " + args.tee_type);
 }
 
@@ -115,6 +128,8 @@ void run_provision(const ProvisionArgs& args) {
     } else if (args.tee_type == "snp") {
         require(args.report_path, "--report");
         require(args.certs_dir,   "--certs");
+    } else if (args.tee_type == "cca") {
+        require(args.token_path, "--token");
     }
     require(args.ca_key_path,  "--ca-key");
     require(args.ca_cert_path, "--ca-cert");
@@ -167,12 +182,10 @@ void run_provision(const ProvisionArgs& args) {
         throw_openssl_error("X509_set_subject_name");
     }
 
-    // Subject Public Key = leaf 証明書の公開鍵
-    //   SGX: PCK leaf / SNP: VCEK leaf。
-    // 「この leaf 公開鍵を持つマシン = 組織管理下」という表明を素直に反映。
-    EVP_PKEY* leaf_pub = X509_get0_pubkey(chip.leaf.get());
-    if (!leaf_pub) throw_openssl_error("X509_get0_pubkey (leaf)");
-    if (X509_set_pubkey(endorsement.get(), leaf_pub) != 1) {
+    // Subject Public Key = 証拠側の attestation 公開鍵
+    //   SGX: PCK leaf / TDX: PCK leaf / SNP: VCEK leaf / CCA: CPAK。
+    // 「この公開鍵を持つマシン = 組織管理下」という表明を素直に反映。
+    if (X509_set_pubkey(endorsement.get(), chip.subject_pubkey.get()) != 1) {
         throw_openssl_error("X509_set_pubkey (endorsement)");
     }
 
@@ -224,6 +237,7 @@ int cli_provision(int argc, char** argv) {
         for (int i = 0; i < argc; ++i) {
             std::string a = argv[i];
             if      (a == "--quote")         args.quote_path     = need_value(i, "--quote");
+            else if (a == "--token")         args.token_path     = need_value(i, "--token");
             else if (a == "--report")        args.report_path    = need_value(i, "--report");
             else if (a == "--certs")         args.certs_dir      = need_value(i, "--certs");
             else if (a == "--snpguest")      args.snpguest_bin   = need_value(i, "--snpguest");
@@ -239,6 +253,7 @@ int cli_provision(int argc, char** argv) {
                     "  tee-anchor provision --tee-type sgx --quote <file> --ca-key <file> --ca-cert <file> --out <file> [options]\n"
                     "  tee-anchor provision --tee-type tdx --quote <file> --ca-key <file> --ca-cert <file> --out <file> [options]\n"
                     "  tee-anchor provision --tee-type snp --report <file> --certs <dir> --ca-key <file> --ca-cert <file> --out <file> [options]\n"
+                    "  tee-anchor provision --tee-type cca --token <file> --ca-key <file> --ca-cert <file> --out <file> [options]\n"
                     "\n"
                     "Common options:\n"
                     "  --ca-key <file>        (required) organization CA private key (PEM)\n"
@@ -246,7 +261,7 @@ int cli_provision(int argc, char** argv) {
                     "  --out <file>           (required) output endorsement cert (PEM)\n"
                     "  --subject <DN>         endorsement cert subject DN (default: auto from Chip ID)\n"
                     "  --validity-days <N>    endorsement validity in days (default: 365)\n"
-                    "  --tee-type <sgx|tdx|snp>  TEE type (default: sgx)\n"
+                    "  --tee-type <sgx|tdx|snp|cca>  TEE type (default: sgx)\n"
                     "\n"
                     "SGX/TDX options (--tee-type sgx | tdx):\n"
                     "  --quote <file>         (required) SGX Quote or TD Quote (binary, e.g. quote.dat)\n"
@@ -255,7 +270,10 @@ int cli_provision(int argc, char** argv) {
                     "  --report <file>        (required) SNP attestation report (binary, report.bin)\n"
                     "  --certs <dir>          (required) dir with ark.pem/ask.pem/vcek.pem (from snpguest fetch)\n"
                     "  --snpguest <path>      snpguest binary used for chain/report verification\n"
-                    "                         (default: looked up on PATH)\n");
+                    "                         (default: looked up on PATH)\n"
+                    "\n"
+                    "Arm CCA options (--tee-type cca):\n"
+                    "  --token <file>         (required) CCA attestation token (CBOR, cca-token.cbor)\n");
                 return 0;
             }
             else {

@@ -10,7 +10,7 @@
 
 CXX      ?= g++
 CXXFLAGS ?= -std=c++17 -O2 -Wall -Wextra
-INCLUDES := -Icommon -Ica -Iprovision -Iprovision/sgx -Iprovision/tdx -Iprovision/sev-snp -Iverify -I.
+INCLUDES := -Icommon -Ica -Iprovision -Iprovision/sgx -Iprovision/tdx -Iprovision/sev-snp -Iprovision/cca -Iverify -I.
 LDLIBS   := -lcrypto
 
 BIN      := tee-anchor
@@ -26,6 +26,7 @@ SRCS := \
     provision/sgx/sgx_provision.cpp \
     provision/tdx/tdx_provision.cpp \
     provision/sev-snp/snp_provision.cpp \
+    provision/cca/cca_provision.cpp \
     verify/verify.cpp
 
 HDRS := \
@@ -34,6 +35,7 @@ HDRS := \
     common/io.hpp \
     common/hex.hpp \
     common/pki_util.hpp \
+    common/cbor.hpp \
     ca/ca_init.hpp \
     ca/revocation_db.hpp \
     ca/revoke.hpp \
@@ -45,6 +47,8 @@ HDRS := \
     provision/tdx/tdx_provision.hpp \
     provision/sev-snp/snp_provision.hpp \
     provision/sev-snp/amd_ark_pubkeys.hpp \
+    provision/cca/cca_provision.hpp \
+    provision/cca/cca_cpak_pubkey.hpp \
     verify/verify.hpp
 
 .PHONY: all clean
@@ -63,6 +67,6 @@ clean:
 	@rm -f $(BIN)
 	@rm -f tee_anchor.o \
 	       ca/*.o binding/*.o common/*.o \
-	       provision/*.o provision/sgx/*.o provision/tdx/*.o provision/sev-snp/*.o \
+	       provision/*.o provision/sgx/*.o provision/tdx/*.o provision/sev-snp/*.o provision/cca/*.o \
 	       verify/*.o
 	@echo "cleaned: $(BIN) (+ any stray .o under our source tree)"

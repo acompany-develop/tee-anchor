@@ -22,11 +22,12 @@
 sudo apt-get install -y build-essential libssl-dev
 ```
 
-> **SGX / TDX の provision** は OpenSSL のみで自己完結します（Quote 内蔵の PCK 証明書から
-> Chip ID を抽出）。**SEV-SNP の provision** は、ベンダー検証（VCEK チェーン + Report 署名）を
+> **SGX / TDX / Arm CCA の provision** は OpenSSL のみで自己完結します（SGX/TDX は Quote 内蔵の
+> PCK 証明書から、CCA は CPAK pin で検証した CCA token から Chip ID を抽出）。
+> **SEV-SNP の provision** は、ベンダー検証（VCEK チェーン + Report 署名）を
 > AMD 製ツール [snpguest](https://github.com/virtee/snpguest) に委譲するため、SNP を使う場合のみ
 > 追加で snpguest が必要です（導入は `provision/sev-snp/snp-sample/` を参照）。
-> TDX の Quote 取得サンプルは `provision/tdx/tdx_sample/` を参照。
+> 各 TEE の証拠取得サンプルは `provision/tdx/tdx_sample/`・`provision/cca/cca_sample/` 等を参照。
 
 ---
 
@@ -46,8 +47,8 @@ make clean      # 生成物を削除
 | サブコマンド | 役割 |
 |---|---|
 | `ca-init`   | 組織 Root CA 鍵 + 自己署名証明書を発行 |
-| `provision` | 証拠から Chip ID を抽出 → 組織 CA で署名した endorsement 証明書を発行 (SGX/TDX: Quote→PPID / SNP: Report→CHIP_ID) |
-| `verify`    | 証拠 + endorsement + 組織 CA で Chip ID binding を検証 (SGX/TDX: Quote / SNP: Report+VCEK、任意で CRL チェック) |
+| `provision` | 証拠から Chip ID を抽出 → 組織 CA で署名した endorsement 証明書を発行 (SGX/TDX: Quote→PPID / SNP: Report→CHIP_ID / CCA: token→instance-id) |
+| `verify`    | 証拠 + endorsement + 組織 CA で Chip ID binding を検証 (SGX/TDX: Quote / SNP: Report+VCEK / CCA: token、任意で CRL チェック) |
 | `revoke`    | endorsement の serial を失効リスト DB に追加 |
 | `crl-issue` | DB から X.509 CRL を発行 |
 
@@ -192,6 +193,44 @@ echo "exit=$?"   # → 0
 → 通過後に CHIP_ID 抽出 → 組織 chain 検証 → Chip ID bit-for-bit 照合。
 詳細は `provision/sev-snp/snp-sample/README.md`。
 
+### Arm CCA の provision
+
+Arm CCA には X.509 が無く、Chip ID は CCA Attestation Token（CBOR/COSE）の
+**`cca-platform-instance-id`(UEID, 33B) を Platform Token から抽出**します。
+ベンダー検証は SGX/SNP の root pin と対称に、**CPAK 公開鍵をコードに pin** して
+Platform Token の COSE_Sign1（ES384）署名を検証します（`provision/cca/cca_cpak_pubkey.hpp`）。
+CBOR/COSE は新規依存を増やさず `common/cbor.hpp` の最小実装で扱います。
+
+```sh
+# (QEMU フルエミュレーション環境で) CCA token を取得
+cd provision/cca/cca_sample
+make setup       # 初回のみ: RME スタック一式をビルド（数十GB・長時間）
+make token       # ヘッドレスで cca-token.cbor を取得
+cd -
+
+# CCA token から instance-id を抽出して endorsement を発行
+./tee-anchor provision --tee-type cca \
+    --token   provision/cca/cca_sample/cca-token.cbor \
+    --ca-key  "$W/ca.key" \
+    --ca-cert "$W/ca.crt" \
+    --out     "$W/cca_endorsement.crt"
+```
+
+発行した endorsement の検証も同じ token で行えます（exit code は他 TEE と共通）：
+
+```sh
+./tee-anchor verify --tee-type cca \
+    --token    provision/cca/cca_sample/cca-token.cbor \
+    --org-cert "$W/cca_endorsement.crt" \
+    --org-ca   "$W/ca.crt"
+echo "exit=$?"   # → 0
+```
+
+検証フロー: CPAK pin で COSE_Sign1(Platform Token) 署名検証 → 通過後に instance-id 抽出
+→ 組織 chain 検証 → Chip ID bit-for-bit 照合。token 取得は `provision/cca/cca_sample/README.md`、
+CPAK の出どころ等は `docs/design.md` の「Arm CCA」節。
+（pin している CPAK は QEMU 環境の固定 dev 鍵。）
+
 ---
 
 ## verify の exit code
@@ -199,7 +238,7 @@ echo "exit=$?"   # → 0
 | code | 意味 |
 |---:|---|
 | 0  | 全検証成功 |
-| 20 | ベンダー証拠検証失敗 (SGX: PCK chain / SNP: VCEK chain・Report 署名。偽 or 改竄、ベンダー root に紐付かない) |
+| 20 | ベンダー証拠検証失敗 (SGX/TDX: PCK chain / SNP: VCEK chain・Report 署名 / CCA: CPAK pin・COSE 署名。偽 or 改竄、ベンダー root に紐付かない) |
 | 21 | 組織 endorsement chain 検証失敗 (CA 不一致など) |
 | 22 | **Chip ID 不一致 (= Proxy/Relay 攻撃検出)** |
 | 24 | 組織 CRL により endorsement が失効済み |
@@ -243,10 +282,14 @@ tee-anchor/
 │   ├── tdx/
 │   │   ├── tdx_provision.{hpp,cpp}      TD Quote(v4/v5) パース + PCK chain 抽出 (検証/PPID は sgx 再利用)
 │   │   └── tdx_sample/                  TD Quote 取得サンプル (libtdx_attest)
-│   └── sev-snp/
-│       ├── snp_provision.{hpp,cpp}      Report パース + CHIP_ID 抽出 (検証は snpguest 委譲)
-│       ├── amd_ark_pubkeys.hpp          AMD ARK pin (Milan/Genoa/Turin の SPKI SHA-384)
-│       └── snp-sample/                  Report/VCEK 取得サンプル (snpguest ラッパ)
+│   ├── sev-snp/
+│   │   ├── snp_provision.{hpp,cpp}      Report パース + CHIP_ID 抽出 (検証は snpguest 委譲)
+│   │   ├── amd_ark_pubkeys.hpp          AMD ARK pin (Milan/Genoa/Turin の SPKI SHA-384)
+│   │   └── snp-sample/                  Report/VCEK 取得サンプル (snpguest ラッパ)
+│   └── cca/
+│       ├── cca_provision.{hpp,cpp}      CCA token(CBOR/COSE) パース + CPAK pin で検証 + instance-id 抽出
+│       ├── cca_cpak_pubkey.hpp          CPAK pin (QEMU dev 鍵 = TF-M cca_platform.pem, P-384)
+│       └── cca_sample/                  CCA token 取得サンプル (QEMU RME スタック + headless driver)
 ├── verify/                     verify サブコマンド
 └── docs/                       設計ドキュメント
 ```
