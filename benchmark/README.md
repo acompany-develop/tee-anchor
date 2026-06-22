@@ -24,8 +24,16 @@ benchmark/
 ├── cca/bench_cca.sh        CCA: evcli vs tee-anchor (hyperfine A/B)
 ├── cca/gen_cpak_key.py     CCA: pin 済み CPAK → cpak.jwk/pem を生成 (evcli 入力用)
 ├── tdx/rp_client.py        TDX: Humane-RAFW-TDX の RP に A/B 計測を統合した版 (MIT, Acompany)
-└── sgx/client_app.cpp      SGX(MAA): Humane-RAFW-MAA の Client_App に A/B 計測を統合した版 (Acompany)
+├── sgx/client_app.cpp      SGX(MAA) verify: Humane-RAFW-MAA の Client_App に A/B 計測を統合した版 (Acompany)
+├── sgx/bench_ca_init.sh    ca-init 計測 (TEE 非依存。曲線 P-256/384/521 比較)
+└── sgx/bench_provision.sh  SGX provision 計測 (Quote→endorsement 発行)
 ```
+
+> **コマンドごとの分割**: `verify` だけでなく `ca-init` / `provision`（発行側）も計測
+> 対象。各 TEE フォルダ内で**コマンド単位**にスクリプトを分ける方針とする。
+> `provision` は TEE 依存（入力が SGX/TDX=Quote, SNP=report, CCA=token）なので
+> TEE ごとに用意する。`ca-init` は **TEE 非依存**（P-384 鍵生成 + 自己署名のみ）
+> なので内容は全 TEE 共通——当面 `sgx/` に置き、他 TEE では同スクリプトを流用する。
 
 ---
 
@@ -142,6 +150,53 @@ BENCH=1 BENCH_RUNS=15 BENCH_WARMUP=5 \
 ネットワーク往復を含むリモート検証である点が TDX (ローカル DCAP QVL) と異なる。よって
 Δ（tee-anchor の SGX verify、Quote 内蔵 PCK チェーンをオフライン検証）と A の比較は、
 **ローカル検証 vs リモート検証という構造差も交絡する**。論文ではその旨を明記する。
+
+---
+
+## 発行側コマンドの計測 (`ca-init` / `provision`)
+
+`verify`（検証側）に加え、組織 PKI の**発行側**コスト（CA 構築 + マシンごとの
+endorsement 発行）も計測する。いずれも単発の CLI コマンドなので
+**hyperfine による A/B 計測**を基本とし、未インストール環境では各スクリプトが
+**bash 簡易ループ計測にフォールバック**する（`date +%s%N` ベース。要 `gawk`）。
+
+### `ca-init` — `sgx/bench_ca_init.sh`
+
+`tee-anchor ca-init`（組織 Root CA 鍵生成 + 自己署名証明書）。**TEE 非依存**。
+曲線ごと（P-256 / P-384=既定 / P-521）に独立コマンドとして測り、鍵生成コストの
+差を見る。
+
+```bash
+./sgx/bench_ca_init.sh
+RUNS=200 WARMUP=20 ./sgx/bench_ca_init.sh
+```
+
+**既存ファイルの影響排除**: `--force` で上書き計測すると本来の「空ディレクトリへの
+新規発行」とコードパスが異なり得るうえ既存ファイル状態が計測を歪める。そこで
+**各試行の直前（計測区間の外）で `ca.key`/`ca.crt` を削除**し、毎回まっさらな状態
+からの新規発行を測る（hyperfine は `--prepare`、bash は反復前の `rm -f`、`--force`
+は付けない）。
+
+### `provision` — `sgx/bench_provision.sh`
+
+`tee-anchor provision --tee-type sgx`（Quote パース → PCK チェーン抽出 → Chip ID
+抽出 → CA 鍵で endorsement 証明書を署名・書出）。ネットワーク往復なし。署名用 CA は
+スクリプト先頭で 1 度だけ `ca-init` して用意（**CA 生成コストは計測に含めない**）。
+入力 Quote は `QUOTE=` で指定（未指定時は `Humane-RAFW-MAA(-rev)/quote.dat` 等を探索）。
+
+```bash
+QUOTE=/path/to/quote.dat ./sgx/bench_provision.sh
+RUNS=200 WARMUP=20 ./sgx/bench_provision.sh
+```
+
+`provision` も毎回 `--out` の endorsement 証明書を書き出すため、`ca-init` と同様
+**各試行の直前で `--out` を削除**してから測る。スクリプトは計測前に
+`provision → verify` を 1 度実行して Chip ID 照合の成否（sanity）も表示する。
+
+> **環境メモ**: 現状この開発機には `hyperfine` 未導入のため、両スクリプトは bash
+> フォールバックで動作確認済み（参考値: P-256≈4.8ms / P-384≈6.5ms / P-521≈5.1ms、
+> provision(sgx)≈6.8ms。OpenSSL は P-384 に専用アセンブリが無く P-521 より遅い）。
+> 厳密計測には `sudo apt-get install hyperfine` を推奨。
 
 ---
 
