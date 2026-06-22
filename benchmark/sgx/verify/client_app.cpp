@@ -22,6 +22,9 @@
 //     TEE_ANCHOR   tee-anchor バイナリのパス (既定 ~/Develop/tee-anchor/tee-anchor)
 //     ORG_CERT     組織エンドースメント証明書 (既定 ./sgx_endorsement.crt)
 //     ORG_CA       組織 CA 証明書 (既定 ./ca.crt)
+//     ORG_CRL      組織 CRL (失効リスト)。指定時のみ --crl 付き verify も計測する
+//                  (未指定ならスキップ)。対象 endorsement が未失効なら exit 0、
+//                  失効済みなら exit 24。CRL 処理の追加コストを Δ で得る。
 //
 #include <sgx_report.h>
 #include <openssl/evp.h>
@@ -118,6 +121,7 @@ typedef struct bench_config_struct
     std::string tee_anchor_bin;
     std::string org_cert;
     std::string org_ca;
+    std::string org_crl;   // 任意: 指定時は --crl 付き verify (失効照合) も併せて計測
 } bench_config_t;
 
 bench_config_t g_bench;
@@ -153,6 +157,7 @@ void load_bench_config()
 
     g_bench.org_cert = env_str("ORG_CERT", "./sgx_endorsement.crt");
     g_bench.org_ca = env_str("ORG_CA", "./ca.crt");
+    g_bench.org_crl = env_str("ORG_CRL", "");   // 未指定なら CRL シナリオはスキップ
 }
 
 
@@ -1170,15 +1175,18 @@ static void conventional_ra_once(const std::string& quote_json, ra_session_t ra_
 }
 
 
-/* TEE Anchor (SGX verify) を subprocess で 1 回。出力は捨て exit code を返す。 */
-static int tee_anchor_verify_once()
+/* TEE Anchor (SGX verify) を subprocess で 1 回。出力は捨て exit code を返す。
+ * with_crl=true のときは --crl <ORG_CRL> を付け、失効リスト照合も行わせる。 */
+static int tee_anchor_verify_once(bool with_crl = false)
 {
     std::string cmd = g_bench.tee_anchor_bin
         + " verify --tee-type sgx"
         + " --quote " + g_bench.quote_out
         + " --org-cert " + g_bench.org_cert
-        + " --org-ca " + g_bench.org_ca
-        + " > /dev/null 2>&1";
+        + " --org-ca " + g_bench.org_ca;
+    if(with_crl)
+        cmd += " --crl " + g_bench.org_crl;
+    cmd += " > /dev/null 2>&1";
 
     int rc = std::system(cmd.c_str());
     if(rc == -1) return -1;
@@ -1188,8 +1196,9 @@ static int tee_anchor_verify_once()
 
 /* do_RA で 1 回信頼判定した後に呼ぶ。
  *   A: 従来 RA のみ (MAA 再送信 + 検証, TEE Anchor を呼ばない)
- *   B: 従来 RA + tee-anchor subprocess (呼ぶ)
- * を各反復でペア計測し、差分 (= TEE Anchor 追加コスト) を出す。 */
+ *   B: 従来 RA + tee-anchor subprocess (CRL なし)
+ *   C: 従来 RA + tee-anchor subprocess (--crl 付き)  ※ ORG_CRL 指定時のみ
+ * を各反復で計測し、差分 (= TEE Anchor 追加コスト / CRL 追加コスト) を出す。 */
 void run_benchmark(const std::string& quote_json, ra_session_t ra_keys)
 {
     /* tee-anchor へ渡す Quote をファイル化 */
@@ -1198,6 +1207,10 @@ void run_benchmark(const std::string& quote_json, ra_session_t ra_keys)
     bool anchor_ok = file_exists(g_bench.tee_anchor_bin)
         && file_exists(g_bench.org_cert)
         && file_exists(g_bench.org_ca);
+
+    /* CRL シナリオ(C)の有効化: ORG_CRL が指定され、かつ anchor 自体が可能なとき */
+    bool crl_ok = anchor_ok && !g_bench.org_crl.empty()
+        && file_exists(g_bench.org_crl);
 
     std::cout << "\n" << std::string(70, '=') << "\n";
     std::cout << "[bench] SGX (MAA) RA benchmark\n";
@@ -1218,9 +1231,23 @@ void run_benchmark(const std::string& quote_json, ra_session_t ra_keys)
         std::cout << "[bench] org-cert   : " << g_bench.org_cert << "\n";
         std::cout << "[bench] org-ca     : " << g_bench.org_ca << "\n";
         int rc = tee_anchor_verify_once();
-        std::cout << "[bench] sanity: tee-anchor verify exit code = " << rc
+        std::cout << "[bench] sanity: tee-anchor verify (no CRL) exit code = " << rc
                   << (rc == 0 ? "  (OK)"
                       : "  (WARNING: 非ゼロ。endorsement/CA/quote の整合を確認)") << "\n";
+        if(crl_ok)
+        {
+            std::cout << "[bench] org-crl    : " << g_bench.org_crl << "\n";
+            int rc_crl = tee_anchor_verify_once(true);
+            std::cout << "[bench] sanity: tee-anchor verify (--crl) exit code = " << rc_crl
+                      << (rc_crl == 0 ? "  (OK: 未失効)"
+                          : rc_crl == 24 ? "  (失効検出: exit 24)"
+                          : "  (WARNING: 想定外の exit code)") << "\n";
+        }
+        else if(!g_bench.org_crl.empty())
+        {
+            std::cout << "[bench] WARNING: ORG_CRL 指定 (" << g_bench.org_crl
+                      << ") が見つからないため CRL シナリオ(C)はスキップします。\n";
+        }
     }
     else
     {
@@ -1240,9 +1267,11 @@ void run_benchmark(const std::string& quote_json, ra_session_t ra_keys)
     {
         conventional_ra_once(quote_json, ra_keys);
         if(anchor_ok) tee_anchor_verify_once();
+        if(crl_ok)    tee_anchor_verify_once(true);
     }
 
     std::vector<double> conv_ms, anchor_ms, total_ms;
+    std::vector<double> anchor_crl_ms, total_crl_ms;
 
     for(int i = 0; i < g_bench.runs; i++)
     {
@@ -1262,6 +1291,16 @@ void run_benchmark(const std::string& quote_json, ra_session_t ra_keys)
             total_ms.push_back(conv + anchor);
         }
 
+        if(crl_ok)
+        {
+            auto t4 = std::chrono::steady_clock::now();
+            tee_anchor_verify_once(true);
+            auto t5 = std::chrono::steady_clock::now();
+            double anchor_crl = std::chrono::duration<double, std::milli>(t5 - t4).count();
+            anchor_crl_ms.push_back(anchor_crl);
+            total_crl_ms.push_back(conv + anchor_crl);
+        }
+
         if((i + 1) % 5 == 0)
             std::cout << "[bench]   " << (i + 1) << "/" << g_bench.runs << " done\n";
     }
@@ -1274,7 +1313,10 @@ void run_benchmark(const std::string& quote_json, ra_session_t ra_keys)
 
     bench_stats_t anchor = {0, 0, 0, 0, 0, 0};
     bench_stats_t total = {0, 0, 0, 0, 0, 0};
+    bench_stats_t anchor_crl = {0, 0, 0, 0, 0, 0};
+    bench_stats_t total_crl = {0, 0, 0, 0, 0, 0};
     double overhead_pct = 0.0;
+    double crl_extra_ms = 0.0;   // C-B: CRL 処理の純追加コスト
 
     if(anchor_ok)
     {
@@ -1283,7 +1325,7 @@ void run_benchmark(const std::string& quote_json, ra_session_t ra_keys)
         overhead_pct = (conv.mean_ms > 0.0)
             ? 100.0 * anchor.mean_ms / conv.mean_ms : 0.0;
 
-        std::cout << "[bench] B. 従来 RA + TEE Anchor (subprocess)          : "
+        std::cout << "[bench] B. 従来 RA + TEE Anchor (CRL なし)            : "
                   << fmt_stats(total) << "\n";
         std::cout << "[bench] D  TEE Anchor 追加コスト (B-A = subprocess 分) : "
                   << fmt_stats(anchor) << "\n";
@@ -1292,6 +1334,23 @@ void run_benchmark(const std::string& quote_json, ra_session_t ra_keys)
             "[bench] 追加コストは従来 RA の %.1f%% (= TEE Anchor を足す相対オーバーヘッド)\n",
             overhead_pct);
         std::cout << pctbuf;
+
+        if(crl_ok)
+        {
+            anchor_crl = compute_stats(anchor_crl_ms);
+            total_crl = compute_stats(total_crl_ms);
+            crl_extra_ms = anchor_crl.mean_ms - anchor.mean_ms;
+
+            std::cout << "[bench] C. 従来 RA + TEE Anchor (--crl 付き)          : "
+                      << fmt_stats(total_crl) << "\n";
+            std::cout << "[bench] D' TEE Anchor(+CRL) 追加コスト (C-A)          : "
+                      << fmt_stats(anchor_crl) << "\n";
+            char crlbuf[160];
+            std::snprintf(crlbuf, sizeof(crlbuf),
+                "[bench] CRL 処理の純追加コスト (C-B = anchor 差)      : %.3f ms\n",
+                crl_extra_ms);
+            std::cout << crlbuf;
+        }
     }
     std::cout << std::string(70, '-') << "\n";
 
@@ -1306,11 +1365,21 @@ void run_benchmark(const std::string& quote_json, ra_session_t ra_keys)
         ofs << "  \"quote_bytes\": " << quote_bytes << ",\n";
         ofs << "  \"tee_anchor_available\": "
             << (anchor_ok ? "true" : "false") << ",\n";
+        ofs << "  \"crl_scenario\": " << (crl_ok ? "true" : "false") << ",\n";
         write_stats_json(ofs, "conventional_ra", conv, anchor_ok);
         if(anchor_ok)
         {
             write_stats_json(ofs, "tee_anchor_subprocess", anchor, true);
             write_stats_json(ofs, "ra_plus_anchor", total, true);
+            if(crl_ok)
+            {
+                write_stats_json(ofs, "tee_anchor_subprocess_crl", anchor_crl, true);
+                write_stats_json(ofs, "ra_plus_anchor_crl", total_crl, true);
+                char crljbuf[128];
+                std::snprintf(crljbuf, sizeof(crljbuf),
+                    "  \"crl_extra_ms\": %.6f,\n", crl_extra_ms);
+                ofs << crljbuf;
+            }
             char ohbuf[128];
             std::snprintf(ohbuf, sizeof(ohbuf),
                 "  \"overhead_pct_of_conventional\": %.6f\n", overhead_pct);
