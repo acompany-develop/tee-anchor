@@ -59,7 +59,7 @@
 /provision/cca/cca_sample/cca-token.cbor
 /provision/cca/cca_sample/cca-token.b64
 /provision/cca/cca_sample/*.cbor
-provision/cca/cca_sample/__pycache__/
+__pycache__/
 
 # ==============================================================================
 # エディタ / OS 固有

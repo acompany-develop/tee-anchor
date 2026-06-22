@@ -25,9 +25,11 @@ PINNED_CERT_PATH = "./pinned_attester_cert.pem"
 
 # ---------------------------------------------------------------------------
 # ベンチマーク設定 (環境変数で上書き可)
-#   従来 RA (verify_quote + appraise_quote) を「TEE Anchor を呼ばない場合」、
+#   従来 RA (verify_quote + appraise_quote) を「TEE Anchor を呼ばない場合(A)」、
 #   その直後に subprocess で tee-anchor verify --tee-type tdx を回す場合を
-#   「呼ぶ場合」とし、do_RA 内で両者をループ計測して差分を出す。
+#   「呼ぶ場合(B)」とし、do_RA 内で両者をループ計測して差分を出す。さらに
+#   ORG_CRL を指定すると tee-anchor verify --crl 付き(C: 失効照合込み)も同時に
+#   計測し、CRL 処理の純追加コスト(C-B)を得る。SGX 版 client_app.cpp と同思想。
 #   hyperfine が使えない (RA が live attester への通信を伴う) ため、Quote を
 #   一度だけ取得し、検証段だけをループする in-process 計測とする。
 # ---------------------------------------------------------------------------
@@ -42,6 +44,10 @@ TEE_ANCHOR_BIN = os.environ.get(
     "TEE_ANCHOR", os.path.expanduser("~/Develop/tee-anchor/tee-anchor"))
 ORG_CERT_PATH  = os.environ.get("ORG_CERT", "./tdx_endorsement.crt")
 ORG_CA_PATH    = os.environ.get("ORG_CA", "./ca.crt")
+# 組織 CRL (失効リスト)。指定時のみ --crl 付き verify (失効照合) シナリオ C も計測する。
+# tee-anchor verify は CRL に endorsement が載っていれば exit 24 を返す。
+# SGX 版 (benchmark/sgx/verify/client_app.cpp) の ORG_CRL と同じ役割。
+ORG_CRL_PATH   = os.environ.get("ORG_CRL", "")
 
 # 計測ループ中は appraise_quote の大量の print を抑止する捨て先
 _DEVNULL = open(os.devnull, "w")
@@ -639,12 +645,16 @@ def _conventional_ra_once(quote_bytes: bytes, result: dict) -> None:
             result["tdeventlog"], result["ima_log"], result["nonce_log_hash"])
 
 
-def _tee_anchor_once(quote_path: str) -> int:
-    """TEE Anchor (TDX verify) を subprocess で 1 回。出力は捨て、exit code を返す。"""
+def _tee_anchor_once(quote_path: str, with_crl: bool = False) -> int:
+    """TEE Anchor (TDX verify) を subprocess で 1 回。出力は捨て、exit code を返す。
+    with_crl=True のときは --crl <ORG_CRL> を付け、失効リスト照合も行わせる
+    (失効済みなら exit 24)。SGX 版 tee_anchor_verify_once(with_crl) と同思想。"""
+    cmd = [TEE_ANCHOR_BIN, "verify", "--tee-type", "tdx",
+           "--quote", quote_path, "--org-cert", ORG_CERT_PATH, "--org-ca", ORG_CA_PATH]
+    if with_crl:
+        cmd += ["--crl", ORG_CRL_PATH]
     return subprocess.run(
-        [TEE_ANCHOR_BIN, "verify", "--tee-type", "tdx",
-         "--quote", quote_path, "--org-cert", ORG_CERT_PATH, "--org-ca", ORG_CA_PATH],
-        stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, check=False,
+        cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, check=False,
     ).returncode
 
 
@@ -668,13 +678,18 @@ def _fmt(s: dict) -> str:
 def run_benchmark(result: dict, quote_bytes: bytes) -> None:
     """do_RA で 1 回信頼判定した後に呼ぶ。
     A: 従来 RA のみ (TEE Anchor を呼ばない)
-    B: 従来 RA + tee-anchor subprocess (呼ぶ)
-    の 2 シナリオを各反復でペア計測し、差分 (= TEE Anchor 追加コスト) を出す。"""
+    B: 従来 RA + tee-anchor subprocess (CRL なし)
+    C: 従来 RA + tee-anchor subprocess (--crl 付き)  ※ ORG_CRL 指定時のみ
+    を各反復で計測し、差分 (= TEE Anchor 追加コスト / CRL 追加コスト) を出す。
+    SGX 版 (benchmark/sgx/verify/client_app.cpp) の A/B/C と同思想。"""
     # tee-anchor へ渡す Quote をファイル化
     with open(QUOTE_OUT_PATH, "wb") as f:
         f.write(quote_bytes)
 
     anchor_ok = all(os.path.exists(p) for p in (TEE_ANCHOR_BIN, ORG_CERT_PATH, ORG_CA_PATH))
+    # CRL シナリオ(C): ORG_CRL が指定され、かつ anchor 自体が可能なときのみ有効
+    crl_ok = anchor_ok and bool(ORG_CRL_PATH) and os.path.exists(ORG_CRL_PATH)
+
     print("\n" + "=" * 70)
     print("[bench] TDX RA benchmark")
     print(f"[bench] runs={BENCH_RUNS} warmup={BENCH_WARMUP}")
@@ -684,8 +699,18 @@ def run_benchmark(result: dict, quote_bytes: bytes) -> None:
         print(f"[bench] org-cert   : {ORG_CERT_PATH}")
         print(f"[bench] org-ca     : {ORG_CA_PATH}")
         rc = _tee_anchor_once(QUOTE_OUT_PATH)
-        print(f"[bench] sanity: tee-anchor verify exit code = {rc}"
+        print(f"[bench] sanity: tee-anchor verify (no CRL) exit code = {rc}"
               + ("  (OK)" if rc == 0 else "  (WARNING: 非ゼロ。endorsement/CA/quote の整合を確認)"))
+        if crl_ok:
+            print(f"[bench] org-crl    : {ORG_CRL_PATH}")
+            rc_crl = _tee_anchor_once(QUOTE_OUT_PATH, with_crl=True)
+            print(f"[bench] sanity: tee-anchor verify (--crl) exit code = {rc_crl}"
+                  + ("  (OK: 未失効)" if rc_crl == 0
+                     else "  (失効検出: exit 24)" if rc_crl == 24
+                     else "  (WARNING: 想定外の exit code)"))
+        elif ORG_CRL_PATH:
+            print(f"[bench] WARNING: ORG_CRL 指定 ({ORG_CRL_PATH}) が見つからないため"
+                  " CRL シナリオ(C)はスキップします。")
     else:
         missing = [p for p in (TEE_ANCHOR_BIN, ORG_CERT_PATH, ORG_CA_PATH) if not os.path.exists(p)]
         print(f"[bench] WARNING: 次が無いため従来 RA のみ計測します: {missing}")
@@ -697,8 +722,11 @@ def run_benchmark(result: dict, quote_bytes: bytes) -> None:
         _conventional_ra_once(quote_bytes, result)
         if anchor_ok:
             _tee_anchor_once(QUOTE_OUT_PATH)
+        if crl_ok:
+            _tee_anchor_once(QUOTE_OUT_PATH, with_crl=True)
 
     conv_ns, anchor_ns, total_ns = [], [], []
+    anchor_crl_ns, total_crl_ns = [], []
     for i in range(BENCH_RUNS):
         t0 = time.perf_counter_ns()
         _conventional_ra_once(quote_bytes, result)
@@ -712,12 +740,21 @@ def run_benchmark(result: dict, quote_bytes: bytes) -> None:
             anchor_ns.append(t3 - t2)
             total_ns.append((t1 - t0) + (t3 - t2))
 
+        if crl_ok:
+            t4 = time.perf_counter_ns()
+            _tee_anchor_once(QUOTE_OUT_PATH, with_crl=True)
+            t5 = time.perf_counter_ns()
+            anchor_crl_ns.append(t5 - t4)
+            total_crl_ns.append((t1 - t0) + (t5 - t4))
+
         if (i + 1) % 10 == 0:
             print(f"[bench]   {i + 1}/{BENCH_RUNS} done")
 
     conv = _stats_ms(conv_ns)
     report = {"runs": BENCH_RUNS, "warmup": BENCH_WARMUP,
               "quote_bytes": len(quote_bytes),
+              "tee_anchor_available": anchor_ok,
+              "crl_scenario": crl_ok,
               "conventional_ra": conv}
 
     print("\n" + "-" * 70)
@@ -729,9 +766,20 @@ def run_benchmark(result: dict, quote_bytes: bytes) -> None:
         report["ra_plus_anchor"] = total
         overhead_pct = 100.0 * anchor["mean_ms"] / conv["mean_ms"]
         report["overhead_pct_of_conventional"] = overhead_pct
-        print(f"[bench] B. 従来 RA + TEE Anchor (subprocess)           : {_fmt(total)}")
+        print(f"[bench] B. 従来 RA + TEE Anchor (CRL なし)             : {_fmt(total)}")
         print(f"[bench] Δ  TEE Anchor 追加コスト (B-A = subprocess 分)  : {_fmt(anchor)}")
         print(f"[bench] 追加コストは従来 RA の {overhead_pct:.1f}% (= TEE Anchor を足す相対オーバーヘッド)")
+
+        if crl_ok:
+            anchor_crl = _stats_ms(anchor_crl_ns)
+            total_crl = _stats_ms(total_crl_ns)
+            crl_extra_ms = anchor_crl["mean_ms"] - anchor["mean_ms"]  # C-B: CRL の純追加コスト
+            report["tee_anchor_subprocess_crl"] = anchor_crl
+            report["ra_plus_anchor_crl"] = total_crl
+            report["crl_extra_ms"] = crl_extra_ms
+            print(f"[bench] C. 従来 RA + TEE Anchor (--crl 付き)           : {_fmt(total_crl)}")
+            print(f"[bench] Δ' TEE Anchor(+CRL) 追加コスト (C-A)           : {_fmt(anchor_crl)}")
+            print(f"[bench] CRL 処理の純追加コスト (C-B = anchor 差)       : {crl_extra_ms:.3f} ms")
     print("-" * 70)
 
     with open(BENCH_OUT, "w") as f:
@@ -741,6 +789,9 @@ def run_benchmark(result: dict, quote_bytes: bytes) -> None:
         print("[bench] 注意: Δ は subprocess 起動を含む「TEE Anchor を後付けした実コスト」。")
         print("[bench]       tee-anchor の TDX verify は PCK チェーンを quote 内証明書で")
         print("[bench]       オフライン検証するため、追加のネットワーク往復は発生しない。")
+        if crl_ok:
+            print("[bench]       --crl 照合も組織 CRL ファイルをローカル参照するのみで、")
+            print("[bench]       やはりネットワーク往復は発生しない (C-B はその純コスト)。")
 
 
 def do_RA():

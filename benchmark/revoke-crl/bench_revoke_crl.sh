@@ -27,9 +27,17 @@
 #   "&&" を使うためシェル経由＝ -N は使わない）。無ければ bash 簡易ループにフォール
 #   バックし、2 コマンドを同一計測区間にまとめて測る。
 #
+# TEE 種別について:
+#   計測対象の revoke / crl-issue は **TEE 非依存** の純 PKI 操作のため、どの TEE で
+#   発行した endorsement でも結果は本質的に変わらない。ただし失効対象 endorsement を
+#   用意する provision には TEE 種別が要る。既定は sgx だが、TEE_TYPE=tdx を指定すると
+#   TD Quote から発行した endorsement を失効対象にできる（探索 Quote パスも切替わる）。
+#
 # 使い方:
 #   ./bench_revoke_crl.sh
+#   TEE_TYPE=tdx ./bench_revoke_crl.sh                    # TD Quote で失効対象を発行
 #   QUOTE=/path/to/quote.dat ./bench_revoke_crl.sh
+#   TEE_TYPE=tdx QUOTE=/path/to/td_quote.dat ./bench_revoke_crl.sh
 #   RUNS=200 WARMUP=20 ./bench_revoke_crl.sh
 #   TEE_ANCHOR=/path/to/tee-anchor ./bench_revoke_crl.sh
 
@@ -39,6 +47,12 @@ WARMUP="${WARMUP:-20}"
 RUNS="${RUNS:-200}"
 OUT_PREFIX="${OUT_PREFIX:-bench_revoke_crl}"
 CA_CURVE="${CA_CURVE:-P-384}"          # 署名 CA の曲線（既定 = tee-anchor 既定）
+TEE_TYPE="${TEE_TYPE:-sgx}"            # 失効対象 endorsement を発行する TEE 種別 (sgx|tdx)
+
+case "$TEE_TYPE" in
+    sgx|tdx) ;;
+    *) echo "TEE_TYPE は sgx か tdx のみ対応します（指定値: $TEE_TYPE）" >&2; exit 1;;
+esac
 REASON="${REASON:-keyCompromise}"      # revoke の失効理由
 
 log()  { echo -e "\033[1;32m[bench-revoke-crl]\033[0m $*"; }
@@ -76,16 +90,25 @@ TEE_ANCHOR="$(find_bin "${TEE_ANCHOR:-}" tee-anchor \
 # ---------------------------------------------------------------------------
 QUOTE="${QUOTE:-}"
 if [ -z "$QUOTE" ]; then
-    for c in \
-        "${BUNDLE_DIR:-}/quote.dat" \
-        "$HOME/Develop/Humane-RAFW-MAA-rev/quote.dat" \
-        "$HOME/Develop/Humane-RAFW-MAA/quote.dat" \
-        "$SCRIPT_DIR/quote.dat"; do
+    if [ "$TEE_TYPE" = "tdx" ]; then
+        cands=( \
+            "${BUNDLE_DIR:-}/quote.dat" \
+            "$HOME/Develop/Humane-RAFW-TDX/relying-party/quote.dat" \
+            "$HOME/Develop/Humane-RAFW-TDX/quote.dat" \
+            "$SCRIPT_DIR/quote.dat" )
+    else
+        cands=( \
+            "${BUNDLE_DIR:-}/quote.dat" \
+            "$HOME/Develop/Humane-RAFW-MAA-rev/quote.dat" \
+            "$HOME/Develop/Humane-RAFW-MAA/quote.dat" \
+            "$SCRIPT_DIR/quote.dat" )
+    fi
+    for c in "${cands[@]}"; do
         [ -n "$c" ] && [ -f "$c" ] && { QUOTE="$c"; break; }
     done
 fi
 [ -n "$QUOTE" ] && [ -f "$QUOTE" ] \
-    || die "SGX Quote が見つかりません。QUOTE=<path> で指定してください（失効対象 endorsement の発行に使用）。"
+    || die "${TEE_TYPE^^} Quote が見つかりません。QUOTE=<path> で指定してください（失効対象 endorsement の発行に使用）。"
 
 # ---------------------------------------------------------------------------
 # 計測用作業ディレクトリと、CA・失効対象 endorsement の準備（計測に含めない）
@@ -102,9 +125,9 @@ CRL="$WORK/crl.pem"
 
 "$TEE_ANCHOR" ca-init --out-dir "$WORK" --curve "$CA_CURVE" --force >/dev/null 2>&1 \
     || die "署名用 CA の ca-init に失敗しました。"
-"$TEE_ANCHOR" provision --tee-type sgx --quote "$QUOTE" \
+"$TEE_ANCHOR" provision --tee-type "$TEE_TYPE" --quote "$QUOTE" \
     --ca-key "$CA_KEY" --ca-cert "$CA_CERT" --out "$ENDORSE" >/dev/null 2>&1 \
-    || die "失効対象 endorsement の provision に失敗しました: $QUOTE"
+    || die "失効対象 endorsement の provision に失敗しました ($TEE_TYPE): $QUOTE"
 
 # 各試行直前に失効 DB と CRL 出力を消すための prepare（計測区間の外で実行）
 PREP_RM="rm -f $DB $CRL"
@@ -120,7 +143,7 @@ else
 fi
 
 log "tee-anchor : $TEE_ANCHOR"
-log "endorsement: $ENDORSE (CA 曲線 $CA_CURVE, 失効理由 $REASON)"
+log "endorsement: $ENDORSE ($TEE_TYPE quote から発行, CA 曲線 $CA_CURVE, 失効理由 $REASON)"
 log "warmup=$WARMUP runs=$RUNS  out=${OUT_PREFIX}.{md,json}"
 echo
 
