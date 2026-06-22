@@ -26,7 +26,8 @@ benchmark/
 ├── tdx/rp_client.py        TDX: Humane-RAFW-TDX の RP に A/B 計測を統合した版 (MIT, Acompany)
 ├── sgx/client_app.cpp      SGX(MAA) verify: Humane-RAFW-MAA の Client_App に A/B 計測を統合した版 (Acompany)
 ├── sgx/bench_ca_init.sh    ca-init 計測 (TEE 非依存。曲線 P-256/384/521 比較)
-└── sgx/bench_provision.sh  SGX provision 計測 (Quote→endorsement 発行)
+├── sgx/bench_provision.sh  SGX provision 計測 (Quote→endorsement 発行)
+└── revoke-crl/bench_revoke_crl.sh  revoke + crl-issue を 1 セットで計測 (TEE 非依存)
 ```
 
 > **コマンドごとの分割**: `verify` だけでなく `ca-init` / `provision`（発行側）も計測
@@ -193,10 +194,32 @@ RUNS=200 WARMUP=20 ./sgx/bench_provision.sh
 **各試行の直前で `--out` を削除**してから測る。スクリプトは計測前に
 `provision → verify` を 1 度実行して Chip ID 照合の成否（sanity）も表示する。
 
-> **環境メモ**: 現状この開発機には `hyperfine` 未導入のため、両スクリプトは bash
-> フォールバックで動作確認済み（参考値: P-256≈4.8ms / P-384≈6.5ms / P-521≈5.1ms、
-> provision(sgx)≈6.8ms。OpenSSL は P-384 に専用アセンブリが無く P-521 より遅い）。
-> 厳密計測には `sudo apt-get install hyperfine` を推奨。
+### `revoke` + `crl-issue` — `revoke-crl/bench_revoke_crl.sh`
+
+証明書ライフサイクルの**失効系**を、`revoke`（失効 DB へ追記）→ `crl-issue`
+（DB から CRL を署名・発行）の **1 セット**として計測する（個別ではなくセット）。
+revoke/crl-issue も **TEE 非依存**の純 PKI 操作なので、TEE 別フォルダの外の
+`revoke-crl/` に置く。署名用 CA と失効対象 endorsement は先頭で 1 度だけ用意する
+（その生成コストは計測に含めない。endorsement 発行に `QUOTE=` を使用）。
+
+```bash
+./revoke-crl/bench_revoke_crl.sh                    # 既定 WARMUP=20 RUNS=200
+QUOTE=/path/to/quote.dat ./revoke-crl/bench_revoke_crl.sh
+RUNS=200 WARMUP=20 ./revoke-crl/bench_revoke_crl.sh
+```
+
+**既存状態の影響排除**: `crl-issue` のコストは失効 DB のエントリ数に依存する。同じ
+DB に revoke を積み増すと DB が単調増加し計測が歪むため、**各試行の直前（計測区間
+の外）で失効 DB と CRL 出力を削除**し、毎回「空 DB → 1 件 revoke → 1 件 CRL 発行」
+という同一条件のセットコストを測る（hyperfine は `--prepare`、bash は反復前 `rm -f`）。
+hyperfine では `revoke && crl-issue` を 1 コマンド列としてシェル経由で測る（`&&` の
+ため `-N` は使わない）。
+
+> **参考値 (この開発機)**: `hyperfine` 利用可。warmup=20 runs=200 で
+> revoke+crl-issue セット ≈ **7.07 ± 0.15 ms** (median 7.04 / min 6.88 / max 8.67)。
+> ca-init は P-256≈4.8ms / P-384≈6.5ms / P-521≈5.1ms、provision(sgx)≈6.8ms。
+> (OpenSSL は P-384 に専用アセンブリが無く P-521 より遅い。)
+> `hyperfine` 未導入の環境では各スクリプトが bash 簡易計測へ自動フォールバックする。
 
 ---
 
