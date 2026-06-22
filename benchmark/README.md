@@ -8,6 +8,7 @@ SGX/TDX/SNP/CCA 横断の TEE Anchor について、**「従来 RA 検証器」�
 | SEV-SNP | `snpguest verify` | `tee-anchor verify --tee-type snp` | `hyperfine` (`snp/bench_snp.sh`) |
 | Arm CCA | `evcli cca check` | `tee-anchor verify --tee-type cca` | `hyperfine` (`cca/bench_cca.sh`) |
 | Intel TDX | DCAP QVL (`verify_quote` + appraise) | `tee-anchor verify --tee-type tdx` | in-process ループ計測 (`tdx/rp_client.py`) |
+| Intel SGX (MAA) | MAA への Quote 送信 + JWT/Enclave 検証 | `tee-anchor verify --tee-type sgx` | in-process ループ計測 (`sgx/client_app.cpp`) |
 
 > 各スクリプトは `tee-anchor` バイナリ（リポジトリ直下でビルドしたもの）を呼ぶ。
 > `TEE_ANCHOR=<path>` で明示指定可。未指定時は `../../tee-anchor` と `~/Develop/tee-anchor/tee-anchor` を探索。
@@ -22,7 +23,8 @@ benchmark/
 ├── snp/bench_snp.sh        SNP: snpguest vs tee-anchor (hyperfine A/B)
 ├── cca/bench_cca.sh        CCA: evcli vs tee-anchor (hyperfine A/B)
 ├── cca/gen_cpak_key.py     CCA: pin 済み CPAK → cpak.jwk/pem を生成 (evcli 入力用)
-└── tdx/rp_client.py        TDX: Humane-RAFW-TDX の RP に A/B 計測を統合した版 (MIT, Acompany)
+├── tdx/rp_client.py        TDX: Humane-RAFW-TDX の RP に A/B 計測を統合した版 (MIT, Acompany)
+└── sgx/client_app.cpp      SGX(MAA): Humane-RAFW-MAA の Client_App に A/B 計測を統合した版 (Acompany)
 ```
 
 ---
@@ -101,6 +103,45 @@ BENCH=1 BENCH_RUNS=50 BENCH_WARMUP=5 \
 **注意 (解釈)**: SNP のような入れ子ではなく、同一 Quote に対する従来 RA とは独立に
 tee-anchor を足す**加算オーバーヘッド**。tee-anchor の TDX verify は PCK チェーンを
 Quote 内蔵証明書でオフライン検証するため、Δ に追加のネットワーク往復は含まれない。
+
+---
+
+## Intel SGX (MAA) — `sgx/client_app.cpp`
+
+これは [Humane-RAFW-MAA](https://github.com/acompany-develop/Humane-RAFW-MAA) の
+`Client_App/client_app.cpp` に A/B 計測を統合した版（© Acompany Co., Ltd.）。**単体では
+ビルド・実行できない**: SGX SDK・OpenSSL・`common/` ユーティリティ・稼働中の SGX サーバ
+（attester）・Azure MAA への到達性が必要なので、Humane-RAFW-MAA の `Client_App/` に
+**この `client_app.cpp` で元ファイルを置き換えて** `make` し直してから実行する。
+
+`do_RA` は通常どおり 1 回 RA で信頼判定したあと、`BENCH=1` のときだけ `run_benchmark()`
+を実行する。MAA は毎回ネットワーク往復を伴う（Quote 検証も JWK 取得も MAA への問い合わせ）
+ため、TDX の「Quote 1 回取得 → 検証段のみ反復」とは異なり、**1 回取得した Quote を使い回し
+つつ MAA への再送信を含む従来 RA をループ**する。問い合わせコストが高いのでループ回数は
+ウォームアップ込みで 20 回程度に抑える:
+
+- **A**: 従来 RA = `send_quote_to_maa`（MAA で Quote 検証）+ `process_ra_report`（JWK 取得・JWT 署名検証・Enclave 同一性検証）
+- **B**: A + `system()` で `tee-anchor verify --tee-type sgx`
+- **Δ = B − A**: TEE Anchor を後付けした追加コスト（subprocess 起動込み）
+
+```bash
+# Humane-RAFW-MAA/Client_App/client_app.cpp を本ファイルで置換し make 後、
+# Client_App/ (settings_client.ini のあるディレクトリ) で:
+BENCH=1 BENCH_RUNS=15 BENCH_WARMUP=5 \
+  ORG_CERT=./sgx_endorsement.crt ORG_CA=./ca.crt \
+  TEE_ANCHOR=/path/to/tee-anchor \
+  ./client_app
+```
+
+環境変数: `BENCH`(=1で有効) `BENCH_RUNS`(既定 15) `BENCH_WARMUP`(既定 5)
+`BENCH_OUT`(既定 ./bench_sgx.json) `QUOTE_OUT`(既定 ./quote.dat) `TEE_ANCHOR`
+`ORG_CERT`(既定 ./sgx_endorsement.crt) `ORG_CA`(既定 ./ca.crt)。
+`ORG_CERT` は `tee-anchor provision --tee-type sgx --pck-cert ... ` 等で事前発行しておく。
+
+**注意 (解釈)**: TDX 同様の**加算オーバーヘッド**だが、ベースライン A が MAA への
+ネットワーク往復を含むリモート検証である点が TDX (ローカル DCAP QVL) と異なる。よって
+Δ（tee-anchor の SGX verify、Quote 内蔵 PCK チェーンをオフライン検証）と A の比較は、
+**ローカル検証 vs リモート検証という構造差も交絡する**。論文ではその旨を明記する。
 
 ---
 
