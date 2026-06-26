@@ -1,16 +1,19 @@
 #!/usr/bin/env bash
-# bench_snp.sh — verify_snp.sh の「snpguest を叩く段」と「tee-anchor verify 段」を
-# hyperfine でプロセスレベル A/B 計測する。
+# bench_snp.sh — 従来手法 (ベンダーツール snpguest によるベンダー検証) と
+# tee-anchor verify (自前インプロセス検証) を hyperfine でプロセスレベル A/B 計測する。
 #
 # 計測対象 (それぞれ独立コマンドとして測る):
-#   A. snpguest verify certs        : ARK->ASK->VCEK チェーン検証
-#   B. snpguest verify attestation  : VCEK による Report 署名検証
-#   C. tee-anchor verify --tee-type snp : 組織 endorsement chain + Chip ID 照合
+#   A. snpguest verify certs        : ARK->ASK->VCEK チェーン検証 (従来手法 / ベンダーツール)
+#   B. snpguest verify attestation  : VCEK による Report 署名検証 (従来手法 / ベンダーツール)
+#   C. tee-anchor verify --tee-type snp : 同等のベンダー検証 (チェーン + Report 署名) を
+#      OpenSSL で**インプロセス**実行し、加えて 組織 endorsement chain + Chip ID 照合まで行う
 #
 # 注意 (内訳の解釈):
-#   C は内部で snpguest をサブプロセスとして起動する。つまり
-#       C ≈ (A + B) + 組織 endorsement chain + Chip ID 照合
-#   なので「TEE Anchor 固有のオーバーヘッド」は概ね  C - (A + B)  に相当する。
+#   A/B は従来 (snpguest 委譲) 方式の「ベンダー検証」を 2 つのサブプロセスとして測ったもの。
+#   C は同等のベンダー検証 (ARK pin + ARK->ASK->VCEK チェーン + Report 署名) を自前実装で
+#   インプロセス実行し、さらに組織 endorsement chain + Chip ID 照合まで 1 プロセスで行う。
+#   つまり C は snpguest を一切起動しない。従来方式 (A+B を別プロセスで起動) に対する
+#   サブプロセス削減の効果は、概ね  (A + B) と C の差  として読める。
 #
 # 分解能について:
 #   - 時計の分解能はボトルネックではない。支配項はプロセス起動のばらつき。
@@ -46,7 +49,7 @@ die()  { echo -e "\033[1;31m[bench-snp]\033[0m $*" >&2; exit 1; }
 command -v hyperfine >/dev/null 2>&1 || die "hyperfine が見つかりません。'sudo apt-get install hyperfine' を実行してください。"
 
 # ---------------------------------------------------------------------------
-# snpguest / tee-anchor の探索 (verify_snp.sh と同じ)
+# snpguest (A/B の従来手法ベースライン用) / tee-anchor の探索
 # ---------------------------------------------------------------------------
 find_bin() {
     local explicit="$1"; local on_path="$2"; shift 2
@@ -115,10 +118,10 @@ hyperfine -N \
     --command-name "B. snpguest verify attestation" \
         "$SNPGUEST verify attestation $CERTS_DIR $REPORT" \
     --command-name "C. tee-anchor verify (snp)" \
-        "$TEE_ANCHOR verify --tee-type snp --report $REPORT --certs $CERTS_DIR --snpguest $SNPGUEST --org-cert $ORG_CERT --org-ca $ORG_CA" \
+        "$TEE_ANCHOR verify --tee-type snp --report $REPORT --certs $CERTS_DIR --org-cert $ORG_CERT --org-ca $ORG_CA" \
     --export-markdown "${OUT_PREFIX}.md" \
     --export-json "${OUT_PREFIX}.json"
 
 echo
 log "結果を ${OUT_PREFIX}.md / ${OUT_PREFIX}.json に保存しました。"
-log "TEE Anchor 固有オーバーヘッド ≈ C - (A + B) として解釈してください。"
+log "A+B = 従来 (snpguest 委譲) のベンダー検証。C = tee-anchor のインプロセス検証 (snpguest 不使用)。"

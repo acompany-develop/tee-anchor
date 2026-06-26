@@ -30,7 +30,7 @@ SGX / TDX / SEV-SNP / Arm CCA 横断の TEE Anchor について、コマンド�
 benchmark/
 ├── README.md
 ├── snp/
-│   ├── verify/bench_snp.sh           SNP verify: snpguest vs tee-anchor (hyperfine A/B/C)
+│   ├── verify/bench_snp.sh           SNP verify: snpguest(従来) vs tee-anchor(自前) (hyperfine A/B/C)
 │   └── provision/bench_provision.sh  SNP provision: report+certs → endorsement 発行
 ├── cca/
 │   ├── verify/bench_cca.sh           CCA verify: evcli vs tee-anchor (hyperfine A/B)
@@ -106,8 +106,11 @@ RUNS=200 WARMUP=20 BUNDLE_DIR=/path/to/bundle ./snp/verify/bench_snp.sh
 ```
 
 計測: `A. snpguest verify certs` / `B. snpguest verify attestation` /
-`C. tee-anchor verify (snp)`。tee-anchor は内部で snpguest を起動する**入れ子**構造
-なので、**TEE Anchor 固有オーバーヘッド ≈ C − (A+B)** と解釈できる。
+`C. tee-anchor verify (snp)`。A/B は**従来手法**（ベンダーツール snpguest を 2 回 fork/exec）の
+ベンダー検証、C は tee-anchor が同等のベンダー検証（ARK pin + チェーン + Report 署名）を
+OpenSSL で**インプロセス**実行し、さらに組織 endorsement chain + Chip ID 照合まで 1 プロセスで
+行う（snpguest は一切起動しない）。**従来方式 (A+B を別プロセス) に対するサブプロセス削減の効果は
+概ね (A+B) と C の差**として読める。
 
 ### Arm CCA — `cca/verify/bench_cca.sh`
 
@@ -236,7 +239,7 @@ TEE ごとに異なるのは **入力（証拠）と内部のベンダー検証�
 | SGX | `--quote <file>` | `QUOTE=` / `Humane-RAFW-MAA(-rev)/quote.dat` | Quote 内蔵 PCK チェーンをインプロセス検証 |
 | TDX | `--quote <file>` | `QUOTE=` / `Humane-RAFW-TDX/.../quote.dat` | TD Quote(v4/v5) 内蔵 PCK チェーンをインプロセス検証 |
 | CCA | `--token <file>` | `TOKEN=` / `~/cca_verify_bundle/cca-token.cbor` | pin 済み CPAK で COSE/ES384 をインプロセス検証 |
-| SNP | `--report <file>` `--certs <dir>` `--snpguest <path>` | `BUNDLE_DIR=` (既定 `~/snp_verify_bundle`) の `report.bin` / `certs/` | ARK pin 照合 + **snpguest をサブプロセス起動**してチェーン/署名検証を委譲 |
+| SNP | `--report <file>` `--certs <dir>` | `BUNDLE_DIR=` (既定 `~/snp_verify_bundle`) の `report.bin` / `certs/` | ARK pin 照合 + ARK→ASK→VCEK チェーン + Report 署名を**インプロセス**検証 |
 
 ```bash
 # SGX
@@ -245,16 +248,15 @@ QUOTE=/path/to/quote.dat ./sgx/provision/bench_provision.sh
 QUOTE=/path/to/td_quote.dat ./tdx/provision/bench_provision.sh
 # CCA
 TOKEN=/path/to/cca-token.cbor ./cca/provision/bench_provision.sh
-# SNP（BUNDLE_DIR から report.bin / certs/ を拾う。SNPGUEST= で snpguest を指定可）
+# SNP（BUNDLE_DIR から report.bin / certs/ を拾う）
 ./snp/provision/bench_provision.sh
 RUNS=200 WARMUP=20 BUNDLE_DIR=/path/to/bundle ./snp/provision/bench_provision.sh
 ```
 
 > **TEE 横断比較の注意 (解釈)**: SGX/TDX は Quote 内蔵 PCK チェーンを、CCA は pin 済み
-> CPAK を、いずれも**インプロセス**で検証するのに対し、**SNP だけは内部で snpguest を
-> 2 回 fork/exec する**（`verify certs` と `verify attestation`）。そのため SNP の
-> provision 計測には**サブプロセス起動オーバーヘッドが内包**される。4 者を並べる際は
-> この非対称性を脚注などで明示すること。
+> CPAK を、SNP は ARK pin + VCEK チェーン + Report 署名を、**いずれもインプロセス**で
+> 検証する（旧版では SNP のみ snpguest を 2 回 fork/exec していたが、自前実装に置き換えた
+> ため、この非対称性は解消された）。4 者は同条件で並べられる。
 
 ### SNP 入力の生成
 

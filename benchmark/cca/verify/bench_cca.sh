@@ -4,18 +4,18 @@
 #
 # 計測対象:
 #   A. evcli cca check               : CCA トークンの構文 + COSE(ES384) 署名検証
-#                                      (= snpguest verify に相当する「従来 RA 検証器」)
+#                                      (SNP の snpguest verify に相当する「従来 RA 検証器」)
 #   B. tee-anchor verify --tee-type cca : CPAK pin で COSE 検証 + 組織 endorsement
 #                                      chain + instance-id (Chip ID) 照合
 #
-# ★ SNP との重要な違い (解釈上の注意):
-#   SNP では tee-anchor が内部で snpguest を起動する入れ子構造だったので
-#   「C - (A+B)」が固有オーバーヘッドになった。CCA は違う:
+# ★ 解釈上の注意 (A/B は別実装の独立検証器):
 #   tee-anchor は evcli を呼ばず、CBOR/COSE 検証を C++/OpenSSL で自前実装している。
 #   よって A(evcli, Go) と B(tee-anchor, C++) は別言語・別実装の独立な検証器であり、
 #       B - A を「TEE Anchor 固有オーバーヘッド」と解釈してはいけない。
 #   本ベンチは「従来 RA 検証器 vs TEE Anchor 検証器」の総実行時間比較であり、
 #   evcli(Go) のランタイム起動コストが交絡する点を論文に明記すること。
+#   (SNP も同様: 以前は tee-anchor が snpguest を内部 fork/exec する入れ子だったが、
+#    現在は自前実装に置き換えたため、CCA と同じく A=従来ツール / C=自前実装の独立比較になった。)
 #   固有オーバーヘッドが要るなら tee-anchor 内部に区間計測 (clock_gettime) を入れる。
 #
 # 分解能/方法論は bench_snp.sh と同じ (時計より反復回数が効く。-N で sh -c を外す)。

@@ -69,25 +69,23 @@ snp-sample/
 ## TEE Anchor の SNP provision での使われ方
 
 `tee-anchor provision --tee-type snp` は、ここで生成した `report.bin` と `certs/`
-を入力に取り、**ベンダー検証（VCEK チェーン検証 + Report 署名検証）を snpguest に
-委譲**する。SGX で同等のベンダー検証を Intel QvL に委ねるのと同じ役割分担で、
-TEE Anchor 本体は「組織 endorsement + Chip ID binding」レイヤに集中する。
+を入力に取り、**ベンダー検証（ARK→ASK→VCEK チェーン検証 + VCEK による Report 署名検証）を
+OpenSSL でインプロセス実行**する。SGX/TDX/CCA と同じく、実行時に外部ツール snpguest は
+不要（snpguest は上記の証拠生成にのみ使う）。
 
 ```sh
 tee-anchor provision --tee-type snp \
     --report report.bin --certs certs \
-    --snpguest ~/snpguest/target/release/snpguest \
     --ca-key ca.key --ca-cert ca.crt --out snp_endorsement.crt
 ```
 
-- `--snpguest` を省略すると PATH 上の `snpguest` を使う。
-- TEE Anchor 側でも信頼根（AMD ARK）は **コードにハードコードした既知値**
-  （Milan/Genoa/Turin の公開鍵 SHA-384）に pin 照合する。snpguest は KDS 取得物の
-  チェーン整合性しか見ないため、この pin で SGX と同じ「信頼根はコードが握る」
-  プロパティを保つ。
-- 検証フロー: ARK pin 照合 → `snpguest verify certs` → `snpguest verify
-  attestation` → 通過後に Report 0x1A0 から CHIP_ID(64B) を抽出。
+- 信頼根（AMD ARK）は **コードにハードコードした既知値**（Milan/Genoa/Turin の公開鍵
+  SHA-384）に pin 照合し、一致した ARK のみを信頼アンカーとして採用する。これで SGX と
+  同じ「信頼根はコードが握る」プロパティを保つ。
+- 検証フロー: Report ヘッダ検証 → ARK pin 照合 → pin した ARK を信頼根に
+  `X509_verify_cert` で ARK→ASK→VCEK チェーン検証 → VCEK 公開鍵で Report 署名
+  （`0x0–0x29F` の ECDSA-P384/SHA-384）を検証 → 通過後に Report 0x1A0 から CHIP_ID(64B) を抽出。
 
-`tee-anchor verify --tee-type snp` も同じ証拠（`report.bin` + `certs/` + snpguest）を
-取り、上記の検証通過後に組織 endorsement chain 検証と Chip ID 照合を行う
-（exit code は SGX と共通: 0/20/21/22/24/30）。
+`tee-anchor verify --tee-type snp` も同じ証拠（`report.bin` + `certs/`）を取り、上記の検証
+通過後に組織 endorsement chain 検証と Chip ID 照合を行う（exit code は SGX と共通:
+0/20/21/22/24/30）。`verify` も snpguest 不要。

@@ -13,10 +13,10 @@
 //   bit-for-bit 比較) とは異なり、本ファイルではダイジェストを pin する。
 //   ダイジェストは pki::pubkey_spki_sha384() で算出するのと同じ値。
 //
-// 役割: 検証そのものは snpguest (verify certs / verify attestation) に委譲するが、
-//   snpguest は KDS から取得した ARK を「自己署名 root だから」信頼するだけで
-//   既知の AMD root への pin はしない。そこで TEE Anchor 側で、チェーン同梱の
-//   ARK の公開鍵がここに列挙した既知値のいずれかと一致するかを追加で照合する。
+// 役割: チェーン検証 (ARK→ASK→VCEK) は OpenSSL の X509_verify_cert で自前に行うが、
+//   その信頼アンカーである ARK を「自己署名 root だから」と無条件に信頼はしない。
+//   verify_vcek_chain() は、チェーン同梱の ARK 公開鍵がここに列挙した既知値の
+//   いずれかと一致する場合のみ、その ARK を信頼アンカーとして採用する。
 //   これにより SGX 経路と同じ「信頼根はコードが握る」プロパティを保つ。
 //
 // 確認: Milan の値は実機 (GCP / EPYC 7B13) で取得した certs/ark.pem の

@@ -5,17 +5,16 @@
 #
 # 計測対象:
 #   tee-anchor provision --tee-type snp --report <report.bin> --certs <certs-dir> \
-#       --snpguest <path> --ca-key <ca.key> --ca-cert <ca.crt> --out <endorsement.crt>
+#       --ca-key <ca.key> --ca-cert <ca.crt> --out <endorsement.crt>
 #
 # 内訳 (支配項):
-#   SNP attestation report のヘッダ検証 → ARK pin 照合 → snpguest による
-#   チェーン(ARK→ASK→VCEK)/Report 署名検証 → report から Chip ID(CHIP_ID) 抽出
-#   → 組織 CA 鍵で X.509 エンドースメント証明書を署名・書出。
+#   SNP attestation report のヘッダ検証 → ARK pin 照合 → ARK→ASK→VCEK チェーン検証 +
+#   VCEK による Report 署名検証 (いずれも OpenSSL でインプロセス実行) → report から
+#   Chip ID(CHIP_ID) 抽出 → 組織 CA 鍵で X.509 エンドースメント証明書を署名・書出。
 #   ※ SGX/TDX が Quote 内蔵 PCK 証明書チェーンを辿り、CCA が pin 済み CPAK で COSE
-#     署名を直接検証するのに対し、SNP は snpguest をサブプロセスとして起動して
-#     チェーン/署名検証を委譲する点が異なる（つまり provision 計測には snpguest の
-#     起動コストが内包される）。ネットワーク往復は無し（証明書は --certs 内蔵分のみ）。
-#     フェアな TEE 横断比較のため SGX/TDX/CCA 版と同条件 (warmup/runs) で測る。
+#     署名を検証するのと同様、SNP もベンダー検証 (チェーン/署名) を**インプロセス**で
+#     行う（外部ツール snpguest は起動しない）。ネットワーク往復も無し（証明書は --certs
+#     内蔵分のみ）。フェアな TEE 横断比較のため SGX/TDX/CCA 版と同条件 (warmup/runs) で測る。
 #
 # 既存ファイルの影響排除:
 #   provision は出力 (--out) のエンドースメント証明書を毎回書き出す。ca-init と同様、
@@ -25,6 +24,7 @@
 #   （CA 生成コストは provision の計測には含めない）。
 #   ※ report/certs は計測対象外で「既に存在する前提」。SNP マシン(CVM)で snpguest が
 #     取得した report.bin と certs/ をファイル入力する（このベンチでは生成しない）。
+#     なお検証はインプロセスで行うため、計測時に snpguest 実行ファイルは不要。
 #
 # 計測ツール:
 #   hyperfine があればそれを使う。無ければ bash 簡易ループにフォールバック。
@@ -34,7 +34,7 @@
 #   BUNDLE_DIR=/path/to/bundle ./bench_provision.sh     # $BUNDLE_DIR/{report.bin,certs} を使う
 #   REPORT=/path/to/report.bin CERTS_DIR=/path/to/certs ./bench_provision.sh
 #   RUNS=200 WARMUP=20 ./bench_provision.sh
-#   SNPGUEST=/path/to/snpguest TEE_ANCHOR=/path/to/tee-anchor ./bench_provision.sh
+#   TEE_ANCHOR=/path/to/tee-anchor ./bench_provision.sh
 
 set -euo pipefail
 
@@ -55,7 +55,7 @@ die()  { echo -e "\033[1;31m[bench-provision-snp]\033[0m $*" >&2; exit 1; }
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
 # ---------------------------------------------------------------------------
-# snpguest / tee-anchor の探索 (bench_snp.sh と同じ流儀)
+# tee-anchor の探索 (bench_snp.sh と同じ流儀)
 # ---------------------------------------------------------------------------
 find_bin() {
     local explicit="$1"; local on_path="$2"; shift 2
@@ -77,10 +77,6 @@ TEE_ANCHOR="$(find_bin "${TEE_ANCHOR:-}" tee-anchor \
     "$SCRIPT_DIR/../../../tee-anchor" \
     "$HOME/Develop/tee-anchor/tee-anchor")" || true
 [ -n "$TEE_ANCHOR" ] || die "tee-anchor が見つかりません。TEE_ANCHOR=<path> で指定するか PATH を通してください。"
-
-SNPGUEST="$(find_bin "${SNPGUEST:-}" snpguest \
-    "$HOME/snpguest/target/release/snpguest")" || true
-[ -n "$SNPGUEST" ] || die "snpguest が見つかりません。SNPGUEST=<path> で指定するか PATH を通してください。"
 
 # ---------------------------------------------------------------------------
 # 入力 report/certs の存在確認（既に存在する前提でファイル入力する）
@@ -111,19 +107,18 @@ PREP_RM="rm -f $OUT_CRT"
 # 健全性チェック: provision が 1 回成功し verify が通るか（クリーンな状態から）
 $PREP_RM
 if "$TEE_ANCHOR" provision --tee-type snp --report "$REPORT" --certs "$CERTS_DIR" \
-        --snpguest "$SNPGUEST" --ca-key "$CA_KEY" --ca-cert "$CA_CERT" --out "$OUT_CRT" >/dev/null 2>&1; then
+        --ca-key "$CA_KEY" --ca-cert "$CA_CERT" --out "$OUT_CRT" >/dev/null 2>&1; then
     if "$TEE_ANCHOR" verify --tee-type snp --report "$REPORT" --certs "$CERTS_DIR" \
-            --snpguest "$SNPGUEST" --org-cert "$OUT_CRT" --org-ca "$CA_CERT" >/dev/null 2>&1; then
+            --org-cert "$OUT_CRT" --org-ca "$CA_CERT" >/dev/null 2>&1; then
         log "sanity: provision→verify OK（発行した endorsement が Chip ID 照合に成功）"
     else
         warn "sanity: provision は成功したが verify が非ゼロ（計測は続行: 発行コスト自体は測れる）"
     fi
 else
-    die "provision が失敗しました。report/certs/snpguest/CA/バイナリの整合を確認してください: $REPORT"
+    die "provision が失敗しました。report/certs/CA/バイナリの整合を確認してください: $REPORT"
 fi
 
 log "tee-anchor : $TEE_ANCHOR"
-log "snpguest   : $SNPGUEST"
 log "report     : $REPORT ($(stat -c%s "$REPORT" 2>/dev/null || echo '?') bytes)"
 log "certs      : $CERTS_DIR"
 log "ca (curve) : $CA_CURVE  ($CA_KEY)"
@@ -135,7 +130,7 @@ echo
 # ===========================================================================
 if command -v hyperfine >/dev/null 2>&1; then
     log "hyperfine を使用します。"
-    for p in "$TEE_ANCHOR" "$SNPGUEST" "$REPORT" "$CERTS_DIR" "$CA_KEY" "$CA_CERT" "$OUT_CRT"; do
+    for p in "$TEE_ANCHOR" "$REPORT" "$CERTS_DIR" "$CA_KEY" "$CA_CERT" "$OUT_CRT"; do
         case "$p" in *" "*) die "パスに空白が含まれています: '$p' (-N モードでは不可)";; esac
     done
     # --prepare: 各試行直前（計測区間の外）で --out を削除し、毎回新規書出を測る。
@@ -144,7 +139,7 @@ if command -v hyperfine >/dev/null 2>&1; then
         --min-runs "$RUNS" \
         --prepare "$PREP_RM" \
         --command-name "provision (snp)" \
-            "$TEE_ANCHOR provision --tee-type snp --report $REPORT --certs $CERTS_DIR --snpguest $SNPGUEST --ca-key $CA_KEY --ca-cert $CA_CERT --out $OUT_CRT" \
+            "$TEE_ANCHOR provision --tee-type snp --report $REPORT --certs $CERTS_DIR --ca-key $CA_KEY --ca-cert $CA_CERT --out $OUT_CRT" \
         --export-markdown "${OUT_PREFIX}.md" \
         --export-json "${OUT_PREFIX}.json"
     echo
@@ -179,7 +174,7 @@ else
             }'
     }
     bench_one "provision (snp)" "$TEE_ANCHOR" provision --tee-type snp --report "$REPORT" \
-        --certs "$CERTS_DIR" --snpguest "$SNPGUEST" --ca-key "$CA_KEY" --ca-cert "$CA_CERT" --out "$OUT_CRT"
+        --certs "$CERTS_DIR" --ca-key "$CA_KEY" --ca-cert "$CA_CERT" --out "$OUT_CRT"
     echo
     log "結果を ${OUT_PREFIX}.json に保存しました。"
 fi

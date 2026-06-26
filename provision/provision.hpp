@@ -14,7 +14,6 @@ struct ProvisionArgs {
     // SEV-SNP 用入力
     std::string report_path;         // --report (tee-type=snp)
     std::string certs_dir;           // --certs  (tee-type=snp; ark.pem/ask.pem/vcek.pem)
-    std::string snpguest_bin;        // --snpguest (省略時は PATH から探索)
 
     // Arm CCA 用入力
     std::string token_path;          // --token (tee-type=cca; cca-token.cbor)

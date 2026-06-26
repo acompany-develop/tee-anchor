@@ -3,21 +3,22 @@
 //
 // Phase 2 / SEV-SNP:
 //   Attestation Report + VCEK 証明書チェーンを入力に取り、
-//   ARK pin 照合 + snpguest によるチェーン/署名検証 → 検証通過後に CHIP_ID を抽出。
+//   ARK pin 照合 + 自前 (OpenSSL) のチェーン/署名検証 → 検証通過後に CHIP_ID を抽出。
 //
-// ベンダー検証 (チェーン + Report 署名) は snpguest に委譲する。詳細は
-// snp_provision.hpp の方針コメントを参照。
+// ベンダー検証 (ARK→ASK→VCEK チェーン + VCEK による Report 署名) は、SGX の
+// PCK チェーン検証 (verify_pck_chain) / CCA の ES384 検証 (verify_es384) と同じく
+// OpenSSL で自前実装する。snpguest への subprocess 依存は廃止した。
 //
 #include "snp_provision.hpp"
 
 #include <algorithm>
 #include <array>
 #include <cstdint>
-#include <cstdio>
 #include <string>
 
-#include <sys/wait.h>
-#include <unistd.h>
+#include <openssl/ecdsa.h>
+#include <openssl/evp.h>
+#include <openssl/x509.h>
 
 #include "error.hpp"
 #include "io.hpp"
@@ -31,6 +32,9 @@ namespace {
 
 constexpr uint32_t kSigAlgoEcdsaP384Sha384 = 1;  // ABI spec Table 139
 
+using EcdsaSigPtr = std::unique_ptr<ECDSA_SIG, Deleter<ECDSA_SIG_free>>;
+using MdCtxPtr    = std::unique_ptr<EVP_MD_CTX, Deleter<EVP_MD_CTX_free>>;
+
 uint32_t rd_u32le(const uint8_t* p) {
     return static_cast<uint32_t>(p[0]) | (static_cast<uint32_t>(p[1]) << 8) |
            (static_cast<uint32_t>(p[2]) << 16) | (static_cast<uint32_t>(p[3]) << 24);
@@ -41,25 +45,14 @@ std::string join_path(const std::string& dir, const char* name) {
     return dir.back() == '/' ? dir + name : dir + "/" + name;
 }
 
-// 引数を直接 execv に渡す (シェルを介さないので injection の心配が無い)。
-// 戻り値は子プロセスの exit code。exec 失敗時は -1。
-int run_process(const std::vector<std::string>& argv) {
-    pid_t pid = fork();
-    if (pid < 0) return -1;
-    if (pid == 0) {
-        std::vector<char*> c;
-        c.reserve(argv.size() + 1);
-        for (const auto& a : argv) c.push_back(const_cast<char*>(a.c_str()));
-        c.push_back(nullptr);
-        execvp(c[0], c.data());
-        // exec 失敗時のみ到達
-        std::perror(("execvp(" + argv[0] + ")").c_str());
-        _exit(127);
-    }
-    int status = 0;
-    if (waitpid(pid, &status, 0) < 0) return -1;
-    if (!WIFEXITED(status)) return -1;
-    return WEXITSTATUS(status);
+// 72 バイトのリトルエンディアン整数 (SIGNATURE の R/S フィールド) を BIGNUM に変換する。
+// BN_bin2bn はビッグエンディアンを取るので、バイト列を反転してから渡す。
+BnPtr le_bytes_to_bn(const uint8_t* le, size_t len) {
+    std::vector<uint8_t> be(len);
+    for (size_t i = 0; i < len; ++i) be[i] = le[len - 1 - i];
+    BnPtr bn(BN_bin2bn(be.data(), static_cast<int>(len), nullptr));
+    if (!bn) throw_openssl_error("BN_bin2bn (SNP signature component)");
+    return bn;
 }
 
 }  // namespace
@@ -109,13 +102,29 @@ std::vector<uint8_t> extract_chip_id_from_report(const std::vector<uint8_t>& rep
     return chip_id;
 }
 
-const char* verify_ark_pin(const std::string& certs_dir) {
-    const std::string ark_path = join_path(certs_dir, "ark.pem");
+SnpChain verify_vcek_chain(const std::string& certs_dir) {
+    // 1. ARK / ASK / VCEK を PEM からロード
+    const std::string ark_path  = join_path(certs_dir, "ark.pem");
+    const std::string ask_path  = join_path(certs_dir, "ask.pem");
+    const std::string vcek_path = join_path(certs_dir, "vcek.pem");
     if (!path_exists(ark_path)) {
         throw TeeAnchorError("ARK certificate not found: " + ark_path +
                              " (expected ark.pem in the certs directory)");
     }
-    X509Ptr ark = pki::load_pem_cert(ark_path);
+    if (!path_exists(ask_path)) {
+        throw TeeAnchorError("ASK certificate not found: " + ask_path +
+                             " (expected ask.pem in the certs directory)");
+    }
+    if (!path_exists(vcek_path)) {
+        throw TeeAnchorError("VCEK certificate not found: " + vcek_path +
+                             " (expected vcek.pem in the certs directory)");
+    }
+    X509Ptr ark  = pki::load_pem_cert(ark_path);
+    X509Ptr ask  = pki::load_pem_cert(ask_path);
+    X509Ptr vcek = pki::load_pem_cert(vcek_path);
+
+    // 2. ARK pin 照合 (信頼根はコード側で握る)。SGX の Intel root ハードコードと
+    //    同じプロパティ。ARK は RSA-4096 で生鍵が嵩むため SPKI の SHA-384 を pin。
     const std::vector<uint8_t> digest = pki::pubkey_spki_sha384(ark.get());
     const char* generation = match_ark_pin(digest);
     if (!generation) {
@@ -124,66 +133,110 @@ const char* verify_ark_pin(const std::string& certs_dir) {
             "(Milan/Genoa/Turin). The certs directory may carry an unknown or "
             "untrusted root.");
     }
-    return generation;
+
+    // 3. pin した ARK を信頼アンカーに、ASK を untrusted 中間として VCEK を検証する。
+    //    (SGX の verify_pck_chain と同じ X509_STORE フロー。)
+    X509StorePtr store(X509_STORE_new());
+    if (!store) throw_openssl_error("X509_STORE_new");
+    if (X509_STORE_add_cert(store.get(), ark.get()) != 1) {
+        throw_openssl_error("X509_STORE_add_cert (ARK)");
+    }
+
+    SkX509Ptr untrusted(sk_X509_new_null());
+    if (!untrusted) throw_openssl_error("sk_X509_new_null");
+    if (sk_X509_push(untrusted.get(), ask.get()) == 0) {
+        throw_openssl_error("sk_X509_push (ASK)");
+    }
+
+    X509StoreCtxPtr ctx(X509_STORE_CTX_new());
+    if (!ctx) throw_openssl_error("X509_STORE_CTX_new");
+    if (X509_STORE_CTX_init(ctx.get(), store.get(), vcek.get(), untrusted.get()) != 1) {
+        throw_openssl_error("X509_STORE_CTX_init");
+    }
+    // CRL チェックはここでは行わない (失効は別経路で扱う)。
+
+    if (X509_verify_cert(ctx.get()) != 1) {
+        const int err = X509_STORE_CTX_get_error(ctx.get());
+        throw TeeAnchorError(
+            std::string("VCEK certificate chain verification failed "
+                        "(ARK->ASK->VCEK): ") +
+            X509_verify_cert_error_string(err));
+    }
+
+    return SnpChain{std::move(vcek), generation};
 }
 
-void run_snpguest_verify(const std::string& snpguest_bin,
-                         const std::string& certs_dir,
-                         const std::string& report_path) {
-    const std::string bin = snpguest_bin.empty() ? "snpguest" : snpguest_bin;
-
-    const int rc_certs = run_process({bin, "verify", "certs", certs_dir});
-    if (rc_certs == 127) {
-        throw TeeAnchorError(
-            "failed to execute snpguest (\"" + bin + "\"). Install it "
-            "(see provision/sev-snp/snp-sample) or pass --snpguest <path>.");
-    }
-    if (rc_certs != 0) {
-        throw TeeAnchorError(
-            "snpguest verify certs failed (exit " + std::to_string(rc_certs) +
-            "): the VCEK certificate chain (ARK->ASK->VCEK) did not validate.");
+void verify_report_signature(const std::vector<uint8_t>& report, X509* vcek) {
+    if (report.size() < kOffSignature + 2 * kEcdsaCompLen) {
+        throw TeeAnchorError("attestation report too short for SIGNATURE field");
     }
 
-    const int rc_att = run_process({bin, "verify", "attestation", certs_dir, report_path});
-    if (rc_att != 0) {
+    // VCEK 公開鍵が EC (P-384) であることを確認する。AMD VCEK は ECDSA P-384/SHA-384。
+    EVP_PKEY* pk = X509_get0_pubkey(vcek);  // borrowed
+    if (!pk) throw_openssl_error("X509_get0_pubkey (VCEK)");
+    if (EVP_PKEY_base_id(pk) != EVP_PKEY_EC) {
+        throw TeeAnchorError("VCEK public key is not EC (expected ECDSA P-384)");
+    }
+
+    // SIGNATURE フィールドの R||S (各 72B LE) を ECDSA_SIG に組み立てる。
+    BnPtr r = le_bytes_to_bn(&report[kOffSignature], kEcdsaCompLen);
+    BnPtr s = le_bytes_to_bn(&report[kOffSignature + kEcdsaCompLen], kEcdsaCompLen);
+
+    EcdsaSigPtr sig(ECDSA_SIG_new());
+    if (!sig) throw_openssl_error("ECDSA_SIG_new");
+    if (ECDSA_SIG_set0(sig.get(), r.get(), s.get()) != 1) {
+        throw_openssl_error("ECDSA_SIG_set0");
+    }
+    r.release();  // 所有権は ECDSA_SIG に移った
+    s.release();
+
+    const int der_len = i2d_ECDSA_SIG(sig.get(), nullptr);
+    if (der_len <= 0) throw_openssl_error("i2d_ECDSA_SIG (length)");
+    std::vector<uint8_t> der(static_cast<size_t>(der_len));
+    unsigned char* pp = der.data();
+    if (i2d_ECDSA_SIG(sig.get(), &pp) != der_len) throw_openssl_error("i2d_ECDSA_SIG");
+
+    // 署名対象は Report 先頭 [0, 0x2A0)。SHA-384 でハッシュして検証する。
+    MdCtxPtr ctx(EVP_MD_CTX_new());
+    if (!ctx) throw_openssl_error("EVP_MD_CTX_new");
+    if (EVP_DigestVerifyInit(ctx.get(), nullptr, EVP_sha384(), nullptr, pk) != 1) {
+        throw_openssl_error("EVP_DigestVerifyInit (ECDSA P-384/SHA-384)");
+    }
+    const int rc = EVP_DigestVerify(ctx.get(), der.data(), der.size(),
+                                    report.data(), kOffSignedEnd);
+    if (rc < 0) throw_openssl_error("EVP_DigestVerify (SNP report)");
+    if (rc != 1) {
         throw TeeAnchorError(
-            "snpguest verify attestation failed (exit " + std::to_string(rc_att) +
-            "): the report signature did not verify against the VCEK.");
+            "attestation report signature did not verify against the VCEK "
+            "public key (report may be forged or the VCEK does not match)");
     }
 }
 
 SnpVerifyResult
 verify_and_extract(const std::string& report_path,
-                   const std::string& certs_dir,
-                   const std::string& snpguest_bin) {
+                   const std::string& certs_dir) {
     // 1. Report のロード + ヘッダ検証
     auto report = read_file(report_path);
     validate_report_header(report);
     const uint32_t version = rd_u32le(&report[kOffVersion]);
 
-    // 2. ARK pin 照合 (信頼根はコード側で握る)
-    const char* generation = verify_ark_pin(certs_dir);
+    // 2. ARK pin 照合 + ARK→ASK→VCEK チェーン検証 (信頼根はコード側で握る)
+    SnpChain chain = verify_vcek_chain(certs_dir);
 
-    // 3. snpguest によるチェーン検証 + Report 署名検証 (ベンダー検証の委譲)
-    run_snpguest_verify(snpguest_bin, certs_dir, report_path);
+    // 3. VCEK による Report 署名検証 (ECDSA P-384/SHA-384)
+    verify_report_signature(report, chain.vcek.get());
 
-    // 4. 検証通過後に CHIP_ID を抽出 + VCEK leaf をロード
+    // 4. 検証通過後に CHIP_ID を抽出
     std::vector<uint8_t> chip_id = extract_chip_id_from_report(report);
 
-    const std::string vcek_path = join_path(certs_dir, "vcek.pem");
-    if (!path_exists(vcek_path)) {
-        throw TeeAnchorError("VCEK certificate not found: " + vcek_path);
-    }
-    X509Ptr vcek = pki::load_pem_cert(vcek_path);
-
-    // (任意のダメ押し) VCEK の hwID 拡張と Report の CHIP_ID が一致するか確認する。
-    // snpguest が Report 署名 (CHIP_ID を含む) と VCEK チェーンを検証済みなので
-    // 通常は一致するが、両ソースの突き合わせを明示しておく。
+    // (ダメ押し) VCEK の hwID 拡張と Report の CHIP_ID が一致するか確認する。
+    // Report 署名 (CHIP_ID を含む) と VCEK チェーンを既に検証済みなので通常は
+    // 一致するが、両ソースの突き合わせを明示しておく。
     {
         Asn1ObjectPtr oid = pki::make_oid(OID_AMD_SEV_HWID);
-        const int idx = X509_get_ext_by_OBJ(vcek.get(), oid.get(), -1);
+        const int idx = X509_get_ext_by_OBJ(chain.vcek.get(), oid.get(), -1);
         if (idx >= 0) {
-            X509_EXTENSION* ext = X509_get_ext(vcek.get(), idx);
+            X509_EXTENSION* ext = X509_get_ext(chain.vcek.get(), idx);
             const ASN1_OCTET_STRING* data = ext ? X509_EXTENSION_get_data(ext) : nullptr;
             if (data) {
                 const uint8_t* p = ASN1_STRING_get0_data(data);
@@ -198,7 +251,8 @@ verify_and_extract(const std::string& report_path,
         }
     }
 
-    return SnpVerifyResult{std::move(chip_id), version, generation, std::move(vcek)};
+    return SnpVerifyResult{std::move(chip_id), version, chain.generation,
+                           std::move(chain.vcek)};
 }
 
 }  // namespace tee_anchor::snp

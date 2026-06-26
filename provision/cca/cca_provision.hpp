@@ -6,7 +6,7 @@
 //
 // 他 TEE との対称性:
 //   SGX/TDX: Quote 内蔵の PCK チェーンを Intel root pubkey で検証 → PPID 抽出
-//   SEV-SNP: Report + VCEK チェーンを snpguest/ARK pin で検証 → CHIP_ID 抽出
+//   SEV-SNP: Report + VCEK チェーンを ARK pin + 自前検証 → CHIP_ID 抽出
 //   Arm CCA: Platform Token を CPAK pin で検証 → instance-id 抽出
 //
 // CCA には X.509 が無いため、endorsement の Subject Public Key には CPAK

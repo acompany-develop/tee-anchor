@@ -79,10 +79,10 @@ ChipIdResult extract_chip_id_for_tdx(const std::string& quote_path) {
 }
 
 ChipIdResult extract_chip_id_for_snp(const ProvisionArgs& args) {
-    // ベンダー検証 (チェーン + Report 署名) は snpguest に委譲し、信頼根 (ARK) は
-    // TEE Anchor 側で pin する。検証通過後に Report の CHIP_ID を抽出する。
+    // ベンダー検証 (ARK pin + ARK→ASK→VCEK チェーン + VCEK による Report 署名) は
+    // OpenSSL で自前実装する (snpguest 依存は廃止)。検証通過後に CHIP_ID を抽出する。
     snp::SnpVerifyResult r =
-        snp::verify_and_extract(args.report_path, args.certs_dir, args.snpguest_bin);
+        snp::verify_and_extract(args.report_path, args.certs_dir);
     std::fprintf(stderr, "[info] SNP report verified (version %u, ARK=%s)\n",
                  r.version, r.generation);
     // SGX の PCK leaf と対称に、VCEK leaf の公開鍵を endorsement の Subject pubkey に使う。
@@ -240,7 +240,6 @@ int cli_provision(int argc, char** argv) {
             else if (a == "--token")         args.token_path     = need_value(i, "--token");
             else if (a == "--report")        args.report_path    = need_value(i, "--report");
             else if (a == "--certs")         args.certs_dir      = need_value(i, "--certs");
-            else if (a == "--snpguest")      args.snpguest_bin   = need_value(i, "--snpguest");
             else if (a == "--ca-key")        args.ca_key_path    = need_value(i, "--ca-key");
             else if (a == "--ca-cert")       args.ca_cert_path   = need_value(i, "--ca-cert");
             else if (a == "--out")           args.out_path       = need_value(i, "--out");
@@ -268,9 +267,8 @@ int cli_provision(int argc, char** argv) {
                     "\n"
                     "SEV-SNP options (--tee-type snp):\n"
                     "  --report <file>        (required) SNP attestation report (binary, report.bin)\n"
-                    "  --certs <dir>          (required) dir with ark.pem/ask.pem/vcek.pem (from snpguest fetch)\n"
-                    "  --snpguest <path>      snpguest binary used for chain/report verification\n"
-                    "                         (default: looked up on PATH)\n"
+                    "  --certs <dir>          (required) dir with ark.pem/ask.pem/vcek.pem\n"
+                    "                         (chain + report signature verified natively)\n"
                     "\n"
                     "Arm CCA options (--tee-type cca):\n"
                     "  --token <file>         (required) CCA attestation token (CBOR, cca-token.cbor)\n");

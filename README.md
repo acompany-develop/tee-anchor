@@ -22,12 +22,12 @@
 sudo apt-get install -y build-essential libssl-dev
 ```
 
-> **SGX / TDX / Arm CCA の provision** は OpenSSL のみで自己完結します（SGX/TDX は Quote 内蔵の
-> PCK 証明書から、CCA は CPAK pin で検証した CCA token から Chip ID を抽出）。
-> **SEV-SNP の provision** は、ベンダー検証（VCEK チェーン + Report 署名）を
-> AMD 製ツール [snpguest](https://github.com/virtee/snpguest) に委譲するため、SNP を使う場合のみ
-> 追加で snpguest が必要です（導入は `provision/sev-snp/snp-sample/` を参照）。
-> 各 TEE の証拠取得サンプルは `provision/tdx/tdx_sample/`・`provision/cca/cca_sample/` 等を参照。
+> **SGX / TDX / SEV-SNP / Arm CCA いずれの provision / verify も OpenSSL のみで自己完結**します
+> （SGX/TDX は Quote 内蔵の PCK 証明書から、SEV-SNP は ARK pin + VCEK チェーン + Report 署名を
+> 自前検証した上で Report から、CCA は CPAK pin で検証した CCA token から Chip ID を抽出）。
+> 実行時に外部のベンダーツール（snpguest 等）は不要です。
+> 各 TEE の証拠取得サンプルは `provision/sev-snp/snp-sample/`・`provision/tdx/tdx_sample/`・
+> `provision/cca/cca_sample/` 等を参照（証拠生成は実機ツールを使いますが、検証には不要）。
 
 ---
 
@@ -157,21 +157,22 @@ echo "exit=$?"   # → 0
 ### SEV-SNP の provision
 
 SEV-SNP では Chip ID が Attestation Report 本体（オフセット 0x1A0）に含まれるため、
-証明書ではなく **Report から CHIP_ID(64B) を抽出**します。ベンダー検証（VCEK チェーン
-検証 + Report 署名検証）は **snpguest に委譲**し、TEE Anchor 側では AMD ARK を
-ハードコード済み既知値（Milan/Genoa/Turin）に pin 照合します。
+証明書ではなく **Report から CHIP_ID(64B) を抽出**します。ベンダー検証（ARK→ASK→VCEK
+チェーン検証 + VCEK による Report 署名検証）は、SGX/TDX/CCA と同じく **OpenSSL で
+インプロセス実装**しており、外部ツール（snpguest）は実行時に不要です。信頼根 AMD ARK は
+ハードコード済み既知値（Milan/Genoa/Turin）に pin 照合し、その ARK を信頼アンカーとして
+`X509_verify_cert` でチェーンを辿ります。
 
 ```sh
-# (SEV-SNP CVM 上で) Report と VCEK チェーンを取得
+# (SEV-SNP CVM 上で) Report と VCEK チェーンを取得（証拠生成のみ snpguest 等を使用）
 cd provision/sev-snp/snp-sample
 ./get_attestation.sh        # report.bin と certs/{ark,ask,vcek}.pem を生成
 cd -
 
-# Report から CHIP_ID を抽出して endorsement を発行
+# Report から CHIP_ID を抽出して endorsement を発行（検証はインプロセス）
 ./tee-anchor provision --tee-type snp \
     --report provision/sev-snp/snp-sample/report.bin \
     --certs  provision/sev-snp/snp-sample/certs \
-    --snpguest ~/snpguest/target/release/snpguest \
     --ca-key  "$W/ca.key" \
     --ca-cert "$W/ca.crt" \
     --out     "$W/snp_endorsement.crt"
@@ -183,14 +184,13 @@ cd -
 ./tee-anchor verify --tee-type snp \
     --report   provision/sev-snp/snp-sample/report.bin \
     --certs    provision/sev-snp/snp-sample/certs \
-    --snpguest ~/snpguest/target/release/snpguest \
     --org-cert "$W/snp_endorsement.crt" \
     --org-ca   "$W/ca.crt"
 echo "exit=$?"   # → 0
 ```
 
-検証フロー: ARK pin 照合 → `snpguest verify certs` → `snpguest verify attestation`
-→ 通過後に CHIP_ID 抽出 → 組織 chain 検証 → Chip ID bit-for-bit 照合。
+検証フロー: Report ヘッダ検証 → ARK pin 照合 → ARK→ASK→VCEK チェーン検証 →
+VCEK による Report 署名検証 → CHIP_ID 抽出 → 組織 chain 検証 → Chip ID bit-for-bit 照合。
 詳細は `provision/sev-snp/snp-sample/README.md`。
 
 ### Arm CCA の provision
@@ -283,9 +283,9 @@ tee-anchor/
 │   │   ├── tdx_provision.{hpp,cpp}      TD Quote(v4/v5) パース + PCK chain 抽出 (検証/PPID は sgx 再利用)
 │   │   └── tdx_sample/                  TD Quote 取得サンプル (libtdx_attest)
 │   ├── sev-snp/
-│   │   ├── snp_provision.{hpp,cpp}      Report パース + CHIP_ID 抽出 (検証は snpguest 委譲)
+│   │   ├── snp_provision.{hpp,cpp}      Report パース + ARK pin/チェーン/Report 署名検証 + CHIP_ID 抽出
 │   │   ├── amd_ark_pubkeys.hpp          AMD ARK pin (Milan/Genoa/Turin の SPKI SHA-384)
-│   │   └── snp-sample/                  Report/VCEK 取得サンプル (snpguest ラッパ)
+│   │   └── snp-sample/                  Report/VCEK 取得サンプル (snpguest ラッパ; 証拠生成用)
 │   └── cca/
 │       ├── cca_provision.{hpp,cpp}      CCA token(CBOR/COSE) パース + CPAK pin で検証 + instance-id 抽出
 │       ├── cca_cpak_pubkey.hpp          CPAK pin (QEMU dev 鍵 = TF-M cca_platform.pem, P-384)

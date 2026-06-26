@@ -63,10 +63,10 @@ std::vector<uint8_t> verify_evidence_and_extract_chip_id(const VerifyArgs& args)
         return ppid_from_pck_chain(tdx::extract_pck_chain_from_quote(quote));
     }
     if (args.tee_type == "snp") {
-        // provision と同じ検証経路を再利用 (ARK pin + snpguest verify certs/attestation)。
-        // verify では VCEK leaf は不要なので chip_id のみ受け取る。
+        // provision と同じ検証経路を再利用 (ARK pin + 自前の ARK→ASK→VCEK チェーン /
+        // VCEK による Report 署名検証)。verify では VCEK leaf は不要なので chip_id のみ受け取る。
         snp::SnpVerifyResult r =
-            snp::verify_and_extract(args.report_path, args.certs_dir, args.snpguest_bin);
+            snp::verify_and_extract(args.report_path, args.certs_dir);
         return std::move(r.chip_id);
     }
     if (args.tee_type == "cca") {
@@ -279,7 +279,6 @@ int cli_verify(int argc, char** argv) {
             else if (a == "--token")    args.token_path    = need_value(i, "--token");
             else if (a == "--report")   args.report_path   = need_value(i, "--report");
             else if (a == "--certs")    args.certs_dir     = need_value(i, "--certs");
-            else if (a == "--snpguest") args.snpguest_bin  = need_value(i, "--snpguest");
             else if (a == "--org-cert") args.org_cert_path = need_value(i, "--org-cert");
             else if (a == "--org-ca")   args.org_ca_path   = need_value(i, "--org-ca");
             else if (a == "--crl")      args.crl_path      = need_value(i, "--crl");
@@ -304,9 +303,8 @@ int cli_verify(int argc, char** argv) {
                     "\n"
                     "SEV-SNP options (--tee-type snp):\n"
                     "  --report <file>        (required) SNP attestation report (binary, report.bin)\n"
-                    "  --certs <dir>          (required) dir with ark.pem/ask.pem/vcek.pem (from snpguest fetch)\n"
-                    "  --snpguest <path>      snpguest binary used for chain/report verification\n"
-                    "                         (default: looked up on PATH)\n"
+                    "  --certs <dir>          (required) dir with ark.pem/ask.pem/vcek.pem\n"
+                    "                         (chain + report signature verified natively)\n"
                     "\n"
                     "Arm CCA options (--tee-type cca):\n"
                     "  --token <file>         (required) CCA attestation token (CBOR, cca-token.cbor)\n"

@@ -84,15 +84,16 @@ SGX/TDX と異なり、**Chip ID が attestation 本体（署名対象）に含�
 - VCEK Cert にも同値が `HWID` extension（OID `1.3.6.1.4.1.3704.1.4`）として載っているため、抽出した CHIP_ID と VCEK hwID を**ダメ押しでクロスチェック**する（必須ではないが両ソースの一致を明示）。
 - **`MaskChipId=1` のプラットフォームでは CHIP_ID が 0 埋め**される。この場合 chip 固有でない値を bind してしまい binding が無意味になるため、all-zero を検知したら**エラーで停止**する（SGX の暗号化 PPID は警告のみだが、SNP の masked CHIP_ID はより明確に危険なため停止）。
 
-#### ベンダー検証の委譲（snpguest）
+#### ベンダー検証（インプロセス自前実装）
 
-VCEK チェーン検証（ARK→ASK→VCEK）と Report 署名検証（VCEK が `0x0–0x29F` に ECDSA-P384/SHA-384 で署名）は、AMD 製ツール **snpguest** に委譲する。
+VCEK チェーン検証（ARK→ASK→VCEK）と Report 署名検証（VCEK が `0x0–0x29F` に ECDSA-P384/SHA-384 で署名）は、SGX の PCK チェーン検証や CCA の ES384 検証と同じく **OpenSSL でインプロセス実装**する（`provision/sev-snp/snp_provision.cpp`）。外部ツール snpguest への subprocess 依存は持たない。
 
-- 役割分担: SGX でベンダー検証を Intel QvL に委ねるのと同型。TEE Anchor 本体は「組織 endorsement + Chip ID binding」レイヤに集中する。AMD の RSA-PSS チェーンや LE エンコードの ECDSA 署名を自前再実装するより、検証実績のある snpguest に委ねるほうが堅牢。
-- ただし**信頼根（AMD ARK）は TEE Anchor 側でも pin する**。snpguest は KDS 取得物のチェーン整合性しか見ず既知 root への pin をしないため、`provision/sev-snp/amd_ark_pubkeys.hpp` にハードコードした各世代 ARK の公開鍵 SHA-384（Milan/Genoa/Turin、AMD KDS の `cert_chain` から取得）と照合する。これで SGX の Intel root ハードコードと同じ「信頼根はコードが握る」プロパティを保つ。
-- provision の検証フロー: **ARK pin 照合 → `snpguest verify certs` → `snpguest verify attestation` → 通過後に CHIP_ID 抽出**。
+- **信頼根（AMD ARK）の pin**: `provision/sev-snp/amd_ark_pubkeys.hpp` にハードコードした各世代 ARK の公開鍵 SHA-384（Milan/Genoa/Turin、AMD KDS の `cert_chain` から取得）と、入力 `ark.pem` の SubjectPublicKeyInfo の SHA-384 を照合する。一致した ARK のみを信頼アンカーとして採用する。これで SGX の Intel root ハードコードと同じ「信頼根はコードが握る」プロパティを保つ（ARK は RSA-4096 で生鍵が嵩むため、SGX の P-256 生 EC point 比較とは異なりダイジェストを pin する）。
+- **チェーン検証**: pin した ARK を `X509_STORE` の信頼アンカーに据え、ASK を untrusted 中間として VCEK を `X509_verify_cert` で検証する（SGX の `verify_pck_chain` と同じフロー。AMD の ARK/ASK は RSA-PSS 署名だが OpenSSL 3.x がそのまま検証する）。
+- **Report 署名検証**: VCEK 公開鍵（EC P-384）で `report[0x0, 0x2A0)` の ECDSA-P384/SHA-384 署名を検証する。SIGNATURE フィールド（`0x2A0`）の R / S はそれぞれ 72 バイト幅のリトルエンディアン整数なので、ビッグエンディアンに反転して `ECDSA_SIG` を組み立て、DER 化して `EVP_DigestVerify` に渡す（CCA の raw r‖s → DER → `EVP_DigestVerify` と同型）。
+- provision の検証フロー: **Report ヘッダ検証 → ARK pin 照合 → ARK→ASK→VCEK チェーン検証 → VCEK による Report 署名検証 → 通過後に CHIP_ID 抽出**。
 
-> 注: SNP の verify サブコマンド対応は未実装（現状 provision のみ）。endorsement の Subject Public Key には SGX の PCK leaf と対称に **VCEK leaf の公開鍵**を流用する。
+> 注: endorsement の Subject Public Key には SGX の PCK leaf と対称に **VCEK leaf の公開鍵**を流用する。verify サブコマンドも同じ検証経路（`verify_and_extract`）を再利用する。
 
 ### Arm CCA（実装済 / provision のみ）
 
@@ -179,8 +180,7 @@ SGX / TDX 用引数（`--tee-type sgx | tdx`）：
 
 SEV-SNP 用引数（`--tee-type snp`）：
 - `--report <file>` (required): Attestation Report（バイナリ、`report.bin`）
-- `--certs <dir>` (required): `ark.pem` / `ask.pem` / `vcek.pem` を含むディレクトリ（snpguest fetch で取得）
-- `--snpguest <path>`: snpguest 実行ファイル（省略時は PATH から探索）
+- `--certs <dir>` (required): `ark.pem` / `ask.pem` / `vcek.pem` を含むディレクトリ（AMD KDS から取得。チェーン/署名検証はインプロセスで行う）
 
 Arm CCA 用引数（`--tee-type cca`）：
 - `--token <file>` (required): CCA Attestation Token（CBOR、`cca-token.cbor`）
@@ -206,8 +206,8 @@ Arm CCA 用引数（`--tee-type cca`）：
 
 処理（SNP）：
 1. Report をロードしヘッダを検証（長さ 1184B、VERSION ∈ 2..5、SIGNATURE_ALGO == ECDSA-P384/SHA-384）
-2. `certs/ark.pem` の公開鍵を **ハードコードした AMD ARK 公開鍵 SHA-384**（Milan/Genoa/Turin）と pin 照合
-3. **snpguest** で `verify certs`（ARK→ASK→VCEK）と `verify attestation`（VCEK が Report に署名）を実行
+2. `certs/ark.pem` の公開鍵を **ハードコードした AMD ARK 公開鍵 SHA-384**（Milan/Genoa/Turin）と pin 照合し、一致した ARK を信頼アンカーとして採用
+3. pin した ARK を信頼根に **`X509_verify_cert` で ARK→ASK→VCEK チェーンを検証**し、続けて **VCEK 公開鍵で Report 署名（`0x0–0x29F` の ECDSA-P384/SHA-384）を `EVP_DigestVerify` で検証**（いずれもインプロセス）
 4. 検証通過後に Report の `CHIP_ID`（offset `0x1A0`、64B）を抽出（all-zero なら MaskChipId としてエラー）。VCEK hwID とクロスチェック
 5. 新規鍵ペアは生成せず、VCEK leaf の公開鍵を Subject Public Key として使用
 6. ChipIdBinding extension（Critical、`teeType = sevSnp(2)`、`chipId = CHIP_ID`）を追加
@@ -241,8 +241,7 @@ SGX / TDX 用引数（`--tee-type sgx | tdx`）：
 
 SEV-SNP 用引数（`--tee-type snp`）：
 - `--report <file>` (required): SNP Attestation Report（バイナリ、`report.bin`）
-- `--certs <dir>` (required): `ark.pem` / `ask.pem` / `vcek.pem` を含むディレクトリ
-- `--snpguest <path>`: snpguest 実行ファイル（省略時は PATH から探索）
+- `--certs <dir>` (required): `ark.pem` / `ask.pem` / `vcek.pem` を含むディレクトリ（チェーン/署名検証はインプロセス）
 
 Arm CCA 用引数（`--tee-type cca`）：
 - `--token <file>` (required): CCA Attestation Token（CBOR、`cca-token.cbor`）
@@ -256,7 +255,7 @@ Arm CCA 用引数（`--tee-type cca`）：
 処理（TDX）：SGX と同一で、差は 1 の Quote パースのみ（v4/v5 フレーミング判定 + 外側 type=6 → 内側 type=5 の降下。`provision/tdx/tdx_provision.cpp` を verify でも再利用）。2.〜4. は SGX と完全共通（exit code も同じ）。
 
 処理（SNP）：
-1. Report ヘッダ検証 → ARK pin 照合 → **snpguest** で `verify certs` + `verify attestation` → 通過後に CHIP_ID(0x1A0, 64B) を抽出（provision と同一経路を再利用）
+1. Report ヘッダ検証 → ARK pin 照合 → **ARK→ASK→VCEK チェーン検証 + VCEK による Report 署名検証（いずれもインプロセス）** → 通過後に CHIP_ID(0x1A0, 64B) を抽出（provision と同一経路 `verify_and_extract` を再利用）
 2. 組織エンドースメント証明書を組織 CA で検証（SGX と共通）
 3. ChipIdBinding の `chipId` と CHIP_ID を **bit-for-bit 一致確認**
 4. 全成功で exit 0
@@ -267,7 +266,7 @@ Arm CCA 用引数（`--tee-type cca`）：
 3. ChipIdBinding の `chipId` と instance-id を **bit-for-bit 一致確認**
 4. 全成功で exit 0（exit code も他 TEE と共通：CPAK pin/COSE 署名失敗は 20）
 
-> 注: provision と同様、Quote/Report/Token の署名・チェーン検証はベンダー側（SGX: 自前 PCK 検証 or 実運用では QvL / SNP: snpguest / CCA: CPAK pin で COSE 検証）に閉じ、TEE Anchor のコア責務は組織 endorsement と Chip ID binding の照合にある。
+> 注: provision と同様、Quote/Report/Token の署名・チェーン検証はベンダー証拠検証の層（SGX: 自前 PCK 検証 or 実運用では QvL / SNP: ARK pin + VCEK チェーン + Report 署名を自前検証 / CCA: CPAK pin で COSE 検証）に閉じ、TEE Anchor のコア責務は組織 endorsement と Chip ID binding の照合にある。SGX 以外（TDX/SNP/CCA）のベンダー検証はすべて OpenSSL でインプロセス実装し、外部ツール依存を持たない。
 
 ### Exit Code 設計
 

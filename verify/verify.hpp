@@ -7,7 +7,8 @@
 //   SGX: 証拠 = Quote。PCK chain を Intel root pubkey で検証し PPID を抽出。
 //   TDX: 証拠 = TD Quote。SGX と同じ(チェーン検証/PPID 抽出は共通)。TD Quote の
 //        v4/v5 フレーミングと二重ネスト Cert Data のパースだけが TDX 固有。
-//   SNP: 証拠 = Report + VCEK チェーン。ARK pin + snpguest 検証し CHIP_ID を抽出。
+//   SNP: 証拠 = Report + VCEK チェーン。ARK pin + 自前の ARK→ASK→VCEK チェーン /
+//        VCEK による Report 署名検証で CHIP_ID を抽出。
 //   CCA: 証拠 = CCA token。CPAK pin で Platform Token(COSE_Sign1/ES384)を検証し
 //        instance-id を抽出。(2)(3) は他 TEE と共通。
 //
@@ -32,7 +33,6 @@ struct VerifyArgs {
     // SEV-SNP 用証拠
     std::string report_path;      // --report (tee-type=snp)
     std::string certs_dir;        // --certs  (tee-type=snp; ark.pem/ask.pem/vcek.pem)
-    std::string snpguest_bin;     // --snpguest (省略時は PATH から探索)
 
     // Arm CCA 用証拠
     std::string token_path;       // --token (tee-type=cca; cca-token.cbor)
