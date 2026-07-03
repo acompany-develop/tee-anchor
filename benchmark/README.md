@@ -1,4 +1,5 @@
 # TEE Anchor ベンチマーク
+**論文におけるTEE Anchor性能評価に使用したコード群を格納するフォルダ。前提とするパスの整理等が出来ておらず、一部では[Humane-RAFW-MAA](https://github.com/acompany-develop/Humane-RAFW-MAA)や[Humane-RAFW-TDX](https://github.com/acompany-develop/Humane-RAFW-TDX/tree/main)への組み込みを前提とする状況となっている。かつ以下の説明は全てClaudeに記述させたものである。あくまでも本ドキュメント及び各種ベンチマークのコードは参考用として見なしていただきたい。**
 
 SGX / TDX / SEV-SNP / Arm CCA 横断の TEE Anchor について、コマンド別にコストを計測する
 スクリプト集。主目的は **「従来 RA 検証器」と「TEE Anchor 検証（組織 endorsement chain
@@ -262,7 +263,7 @@ RUNS=200 WARMUP=20 BUNDLE_DIR=/path/to/bundle ./snp/provision/bench_provision.sh
 
 SNP の `verify` / `provision` ベンチはどちらも `~/snp_verify_bundle/{report.bin, certs/}`
 を入力に取る（「既に存在する前提」で生成はしない）。これらは SEV-SNP CVM 上で snpguest を
-使って生成する。サンプル手順は `provision/sev-snp/snp-sample/get_attestation.sh`
+使って生成する。サンプル手順は `provision/sev-snp/snp_sample/get_attestation.sh`
 （リポジトリ直下の `provision/` 配下）にある。要点:
 
 ```bash

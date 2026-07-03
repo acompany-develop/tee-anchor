@@ -1,80 +1,72 @@
-# TEE Anchor
+# TEE Anchor: Cross-TEE Organizational Endorsement for Mitigating TEE Physical Attacks
+本リポジトリは、任意の組織が独自に形成可能なPKIベースの追加の認証・検証機構により、TEE（Trusted Execution Environment）に対するTEE.failやBattering RAMといった物理攻撃を間接的に予防する事のできるスタンドアロンCLIツール「TEE Anchor」を提供する。
 
-> **Cross-TEE Organizational Endorsement for Mitigating TEE Physical Attacks**
+TEE Anchorは、各種TEEのAttestation Report（AR）またはそれを認証するTEEベンダ発行の証明書（例：Intel SGX/TDXであればPCK Cert）から、そのハードウェア固有のID（Chip ID）を抽出する。一方、組織CAは予め管理対象のChip IDに対し、組織ルートCAをトラストアンカーとした組織リーフ証明書を発行（プロビジョニング）している。この発行した組織証明書内のChip IDと、ARまたはTEEベンダ証明書から抽出したChip IDを比較する事で、真にその組織に当該Attesterマシンが属しているかを検証できる。これにより、例えばマシンを物理的に厳重に管理している組織の管理下にそのマシンがある事を保証する事ができ、ひいてはTEE.failのような物理攻撃が不可能な環境下にある事を検証者は確信する事ができる。
 
-組織独自 PKI ベースの追加検証機構で、TEE（Intel SGX/TDX、AMD SEV-SNP 等）への物理攻撃 (Battering RAM, TEE.fail, BORE 等) を介した **Proxy / Relay 攻撃を間接的に防ぐ**スタンドアロン CLI ツール。Quote の PCK / VCEK 証明書に含まれる Chip ID（PPID 等）と、組織 CA が発行したエンドースメント証明書中の Chip ID を bit-for-bit 照合することで、物理侵害された手元マシンを使ったなりすましを検出します。
+## 導入の前提条件
+* OS: Ubuntu 24.04 LTS（他のLinuxも可能であるが、動作確認済みであるのはこれのみ）
+* `g++` 11+または `clang++` 14+（C++17必須）
+* OpenSSL 3.x
 
-設計詳細・脅威モデル・既存研究との比較は `docs/` 配下を参照：
+## 導入・ビルド手順
+* 前提パッケージのインストールを実施する。
+    ```sh
+    sudo apt-get install -y build-essential libssl-dev
+    ```
 
-- `docs/design.md` — プロトコル設計、X.509 拡張 OID 設計、CRL 設計、exit code 表
-- `docs/threat-model.md`
-- `docs/related-work.md`
+* 以下のコマンドを実行し、`tee-anchor`バイナリを生成する。
+    ```sh
+    make
+    ```
 
----
-
-## 必要環境
-
-- Ubuntu 24.04 (他の Linux でも動くはずですが動作確認は 24.04 のみ)
-- `g++` 11+ または `clang++` 14+ (C++17 必須)
-- **OpenSSL 3.x の開発ヘッダ・ライブラリ** (`libssl-dev` だけで十分。SGX SDK は本体には不要)
-
-```sh
-sudo apt-get install -y build-essential libssl-dev
-```
-
-> **SGX / TDX / SEV-SNP / Arm CCA いずれの provision / verify も OpenSSL のみで自己完結**します
-> （SGX/TDX は Quote 内蔵の PCK 証明書から、SEV-SNP は ARK pin + VCEK チェーン + Report 署名を
-> 自前検証した上で Report から、CCA は CPAK pin で検証した CCA token から Chip ID を抽出）。
-> 実行時に外部のベンダーツール（snpguest 等）は不要です。
-> 各 TEE の証拠取得サンプルは `provision/sev-snp/snp-sample/`・`provision/tdx/tdx_sample/`・
-> `provision/cca/cca_sample/` 等を参照（証拠生成は実機ツールを使いますが、検証には不要）。
-
----
-
-## ビルド
-
-```sh
-make            # tee-anchor バイナリを生成
-make clean      # 生成物を削除
-```
-
-成果物はルート直下の `./tee-anchor` のみ（単一バイナリ）。
-
----
+* 生成物を削除する場合には以下のコマンドを実行する。
+    ```sh
+    make clean
+    ```
 
 ## サブコマンド一覧
-
-| サブコマンド | 役割 |
+| サブコマンド | 説明 |
 |---|---|
-| `ca-init`   | 組織 Root CA 鍵 + 自己署名証明書を発行 |
-| `provision` | 証拠から Chip ID を抽出 → 組織 CA で署名した endorsement 証明書を発行 (SGX/TDX: Quote→PPID / SNP: Report→CHIP_ID / CCA: token→instance-id) |
-| `verify`    | 証拠 + endorsement + 組織 CA で Chip ID binding を検証 (SGX/TDX: Quote / SNP: Report+VCEK / CCA: token、任意で CRL チェック) |
-| `revoke`    | endorsement の serial を失効リスト DB に追加 |
-| `crl-issue` | DB から X.509 CRL を発行 |
+| `ca-init`   | 組織ルートCA鍵を生成し、それを用いて組織ルートCA証明書を発行する。 |
+| `provision` | ARまたはTEEベンダ証明書からChip IDを抽出し、組織CAで署名した組織リーフ証明書を発行する。SGX/TDXの場合はPPID、SEV-SNPの場合はCHIP_ID、CCAの場合はcca-platform-instance-idを用いる。 |
+| `verify`    | ARまたはTEEベンダ証明書、組織リーフ証明書、組織ルートCA証明書を用いてChip IDの一致を確認する。任意でCRLによる失効確認も可能。 |
+| `revoke`    | 組織証明書のシリアルを失効リストDBに追加する。 |
+| `crl-issue` | 失効リストDBからX.509 CRLを発行する。 |
 
-各サブコマンドの詳細は `./tee-anchor <subcmd> --help`。
+各サブコマンドの詳細は`./tee-anchor <subcmd> --help`で確認可能。
 
----
+## クイックスタート
+以下に、SGX、TDX、SEV-SNP、CCAそれぞれの場合における、各サブコマンドの一連の確認手順の説明を行う。
 
-## クイックスタート (End-to-End)
-
-`provision/sgx/sgx_sample/quote.dat` を入力として通しの流れを確認できます（実機でない場合は事前に SGX 実機で sgx_sample を実行して `quote.dat` を取得しておく必要があります。詳細は `provision/sgx/sgx_sample/README.md` を参照）。
-
+### 共通処理（組織CAの初期化）
+各処理に入る前に、以下のコマンドを実行する事で組織CAの初期化を実施する。以降、全ての操作においてこの初期化済み組織CAが存在する事を前提とする。
 ```sh
 W=/tmp/tea_demo
 rm -rf "$W" && mkdir -p "$W"
 
-# 1. 組織 CA を作る
 ./tee-anchor ca-init --out-dir "$W"
+```
 
-# 2. Quote から組織 endorsement 証明書を発行 (provision)
+### SGX
+前提として、SGX Quoteを`provision/sgx/sgx_sample/quote.dat`に配置しておく。SGX Quote取得用のスクリプトを用意しているため、必要であれば`provision/sgx/sgx_sample/README.md`上の説明を参照の上実行の事。これは、`sgx_sample`フォルダ内で以下のような手順で実行するとQuoteを取得する事ができる：
+```sh
+sudo ./setup.sh
+source /opt/intel/sgxsdk/environment
+make
+./sample_app
+```
+デフォルトではAzure SGX VM用であるが、`sgx_default_qcnl.conf`やPCCSの設定等行えば他の環境でも利用可能。詳細は[Humane-RAFW-DCAP](https://github.com/iisec-suzaki/Humane-RAFW-DCAP)も参照の事。
+
+まず、失効処理抜きでの組織CA初期化、プロビジョニング、検証を確認する方法を以下に示す。
+``` sh
+# Quoteから組織リーフ証明書を発行（プロビジョニング）
 ./tee-anchor provision \
     --quote   provision/sgx/sgx_sample/quote.dat \
     --ca-key  "$W/ca.key" \
     --ca-cert "$W/ca.crt" \
     --out     "$W/endorsement.crt"
 
-# 3. 検証 (verify) — 成功すれば exit 0
+# 検証を実施する。成功すればExit Codeは0。
 ./tee-anchor verify \
     --quote    provision/sgx/sgx_sample/quote.dat \
     --org-cert "$W/endorsement.crt" \
@@ -82,8 +74,7 @@ rm -rf "$W" && mkdir -p "$W"
 echo "exit=$?"
 ```
 
-成功時の出力：
-
+成功時の出力は以下の通り：
 ```
 verify: OK
   tee_type       : sgx (0)
@@ -91,22 +82,21 @@ verify: OK
   ...
 ```
 
-### 失効を試す (revoke → crl-issue → verify --crl)
-
-```sh
-# 失効リスト DB にエントリ追加 (まだ CRL ファイルは出ない)
+失効追加、失効リスト払い出し、失効確認付き検証を試すには、プロビジョニングまでは実施した状態で以下の通り：
+``` sh
+# 失効リストDBにエントリ追加
 ./tee-anchor revoke \
     --ca-cert "$W/ca.crt" \
     --cert    "$W/endorsement.crt" \
     --reason  keyCompromise
 
-# DB から CRL を発行
+# DBからCRLを発行
 ./tee-anchor crl-issue \
     --ca-key  "$W/ca.key" \
     --ca-cert "$W/ca.crt" \
     --out     "$W/crl.pem"
 
-# CRL 付きで verify → 失効を検出して exit 24
+# 失効確認付き検証。失効を検出してExit Codeが24となる。
 ./tee-anchor verify \
     --quote    provision/sgx/sgx_sample/quote.dat \
     --org-cert "$W/endorsement.crt" \
@@ -114,33 +104,30 @@ verify: OK
     --crl      "$W/crl.pem"
 echo "exit=$?"   # → 24
 ```
+`--crl`サブコマンドは任意指定であるため、指定しなければ前述の検証例の通り失効確認は実施されない。
 
-`--crl` は **任意指定**で、付けない verify は CRL チェックなしで動作します（後方互換）。
+他のTEEにも共通するが、実際には検証は従来のRAのAR検証後に追加で実施する。例えば従来RA検証完了後、サブプロセス的に`tee-anchor`を呼び出し、組織による認証がされているかを追加で確認するようなイメージである。
 
-### TDX の provision
+### TDX
+TDXはQuote（AR）の構造以外は基本的にSGXと同一であるため、SGXとほぼ同じようにして一連の実行を行う事ができる。
 
-TDX は SGX とほぼ同じで、Chip ID（PPID）は TD Quote 内蔵の PCK 証明書から抽出します
-（SEV-SNP のように Report 本体からは取れません）。SGX との違いは TD Quote のバイナリ構造だけで、
-チェーン検証（Intel SGX Root CA pin）と PPID 抽出は SGX 実装をそのまま再利用しています。
-
+前提として、`provision/tdx/tdx_sample/quote.dat`にTD Quoteを配置しておく。これも同梱のQuote生成サンプルを用いて生成できる。詳細は`provision/tdx/tdx_sample/README.md`を参照。
 ```sh
-# (TDX CVM 上で) TD Quote を取得（要 sudo: /dev/tdx_guest は root 専用）
 cd provision/tdx/tdx_sample
-sudo ./setup.sh        # 初回のみ: libtdx-attest 等を導入
-make && sudo ./get_quote   # quote.dat を生成
+sudo ./setup.sh
+make && sudo ./get_quote
 cd -
+```
+ただし、`/dev/tdx_guest`がゲストに公開されているTDでないとこのサンプルは使用できない。例えばCanonicalの手順に従いベアメタルでビルドしたTDや、GCPのTDでは使用可能であるが、Azureにおいてはこれが公開されていないため使用不可。
 
-# TD Quote から PPID を抽出して endorsement を発行
+以下のコマンドにより、TDX用のプロビジョニング及び検証を実施できる。
+```sh
 ./tee-anchor provision --tee-type tdx \
     --quote   provision/tdx/tdx_sample/quote.dat \
     --ca-key  "$W/ca.key" \
     --ca-cert "$W/ca.crt" \
     --out     "$W/tdx_endorsement.crt"
-```
 
-発行した endorsement の検証も同じ Quote で行えます（exit code は SGX と共通）：
-
-```sh
 ./tee-anchor verify --tee-type tdx \
     --quote    provision/tdx/tdx_sample/quote.dat \
     --org-cert "$W/tdx_endorsement.crt" \
@@ -148,125 +135,73 @@ cd -
 echo "exit=$?"   # → 0
 ```
 
-検証フロー: TD Quote パース → PCK チェーン検証（Intel SGX Root CA pin）→ PPID 抽出 →
-組織 chain 検証 → Chip ID bit-for-bit 照合（SGX と (2)(3) 共通）。TD Quote の v4/v5 で
-フレーミング（PCK チェーンのオフセット）が変わる点と、PCK チェーンが外側 `type=6` の中に
-内側 `type=5` として二重ネストされる点を吸収します。詳細は `docs/design.md` の
-「TDX 固有: TD Quote のパース」、Quote 取得は `provision/tdx/tdx_sample/README.md`。
+失効追加・CRL払い出し・失効の追加検証は、SGXと同様に実施可能である。
 
-### SEV-SNP の provision
-
-SEV-SNP では Chip ID が Attestation Report 本体（オフセット 0x1A0）に含まれるため、
-証明書ではなく **Report から CHIP_ID(64B) を抽出**します。ベンダー検証（ARK→ASK→VCEK
-チェーン検証 + VCEK による Report 署名検証）は、SGX/TDX/CCA と同じく **OpenSSL で
-インプロセス実装**しており、外部ツール（snpguest）は実行時に不要です。信頼根 AMD ARK は
-ハードコード済み既知値（Milan/Genoa/Turin）に pin 照合し、その ARK を信頼アンカーとして
-`X509_verify_cert` でチェーンを辿ります。
-
+### SEV-SNP
+SEV-SNPの場合も、前提としてARを用意しておく必要がある。こちらも同梱のサンプルコードにより以下のように生成できる。詳細は`provision/sev-snp/snp_sample/README.md`を参照。
 ```sh
-# (SEV-SNP CVM 上で) Report と VCEK チェーンを取得（証拠生成のみ snpguest 等を使用）
-cd provision/sev-snp/snp-sample
-./get_attestation.sh        # report.bin と certs/{ark,ask,vcek}.pem を生成
+cd provision/sev-snp/snp_sample
+./get_attestation.sh # report.bin と certs/{ark,ask,vcek}.pem を生成
 cd -
+```
 
-# Report から CHIP_ID を抽出して endorsement を発行（検証はインプロセス）
+プロビジョニングと検証は以下のように実施できる。用語の違いから、SGX/TDXと異なり、`--quote`サブコマンド相当が`--report`、そしてSEV-SNPではTEEベンダ証明書が別添である事から追加で`--certs`サブコマンドが必要となる点に注意。
+```sh
 ./tee-anchor provision --tee-type snp \
-    --report provision/sev-snp/snp-sample/report.bin \
-    --certs  provision/sev-snp/snp-sample/certs \
+    --report provision/sev-snp/snp_sample/report.bin \
+    --certs  provision/sev-snp/snp_sample/certs \
     --ca-key  "$W/ca.key" \
     --ca-cert "$W/ca.crt" \
     --out     "$W/snp_endorsement.crt"
-```
-
-発行した endorsement の検証も同じ証拠で行えます（exit code は SGX と共通）：
-
-```sh
+    
 ./tee-anchor verify --tee-type snp \
-    --report   provision/sev-snp/snp-sample/report.bin \
-    --certs    provision/sev-snp/snp-sample/certs \
+    --report   provision/sev-snp/snp_sample/report.bin \
+    --certs    provision/sev-snp/snp_sample/certs \
     --org-cert "$W/snp_endorsement.crt" \
     --org-ca   "$W/ca.crt"
 echo "exit=$?"   # → 0
 ```
+失効関連処理に関してはSGXやTDXと同様。
 
-検証フロー: Report ヘッダ検証 → ARK pin 照合 → ARK→ASK→VCEK チェーン検証 →
-VCEK による Report 署名検証 → CHIP_ID 抽出 → 組織 chain 検証 → Chip ID bit-for-bit 照合。
-詳細は `provision/sev-snp/snp-sample/README.md`。
+### CCA
+CCAの場合は2026/6現在実機が存在しないため、QEMUによるフルエミュレーション環境上のRealmからToken（AR）を取得する事になる。TokenはCBOR方式となっており、これは決め打ちのCPAK秘密鍵で署名されるため、対応するCPAK公開鍵をハードコーディングしそれにて検証する方式としている。
 
-### Arm CCA の provision
-
-Arm CCA には X.509 が無く、Chip ID は CCA Attestation Token（CBOR/COSE）の
-**`cca-platform-instance-id`(UEID, 33B) を Platform Token から抽出**します。
-ベンダー検証は SGX/SNP の root pin と対称に、**CPAK 公開鍵をコードに pin** して
-Platform Token の COSE_Sign1（ES384）署名を検証します（`provision/cca/cca_cpak_pubkey.hpp`）。
-CBOR/COSE は新規依存を増やさず `common/cbor.hpp` の最小実装で扱います。
-
+まずはこのTokenが必要であるため、以下の同梱のスクリプトを用いてTokenを生成する。詳細は`provision/cca/cca_sample/README.md`を参照。
 ```sh
-# (QEMU フルエミュレーション環境で) CCA token を取得
 cd provision/cca/cca_sample
-make setup       # 初回のみ: RME スタック一式をビルド（数十GB・長時間）
-make token       # ヘッドレスで cca-token.cbor を取得
+make setup # 初回のみ。かなりの時間がかかる。
+make token
 cd -
+```
+特にクラウド等のVM内で実行する場合、VM内でQEMUのフルエミュレーションを実行しさらにその中でRealmを動かすという多重Nested仮想化状態となるため、`make setup`に極めて長い時間がかかる。VMの場合かなり多めのvCPUリソースを積むか、ベアメタル上で実施する事を推奨。
 
-# CCA token から instance-id を抽出して endorsement を発行
+プロビジョニングと検証は以下のように実施できる。用語の違いから、SGX/TDXと異なり、`--quote`サブコマンド相当が`--token`である点に注意。
+``` sh
 ./tee-anchor provision --tee-type cca \
     --token   provision/cca/cca_sample/cca-token.cbor \
     --ca-key  "$W/ca.key" \
     --ca-cert "$W/ca.crt" \
     --out     "$W/cca_endorsement.crt"
-```
 
-発行した endorsement の検証も同じ token で行えます（exit code は他 TEE と共通）：
-
-```sh
 ./tee-anchor verify --tee-type cca \
     --token    provision/cca/cca_sample/cca-token.cbor \
     --org-cert "$W/cca_endorsement.crt" \
     --org-ca   "$W/ca.crt"
 echo "exit=$?"   # → 0
 ```
+失効関連処理は他のTEEと同様。
 
-検証フロー: CPAK pin で COSE_Sign1(Platform Token) 署名検証 → 通過後に instance-id 抽出
-→ 組織 chain 検証 → Chip ID bit-for-bit 照合。token 取得は `provision/cca/cca_sample/README.md`、
-CPAK の出どころ等は `docs/design.md` の「Arm CCA」節。
-（pin している CPAK は QEMU 環境の固定 dev 鍵。）
-
----
-
-## verify の exit code
-
+## verifyサブコマンドのExit Code一覧
 | code | 意味 |
 |---:|---|
-| 0  | 全検証成功 |
-| 20 | ベンダー証拠検証失敗 (SGX/TDX: PCK chain / SNP: VCEK chain・Report 署名 / CCA: CPAK pin・COSE 署名。偽 or 改竄、ベンダー root に紐付かない) |
-| 21 | 組織 endorsement chain 検証失敗 (CA 不一致など) |
-| 22 | **Chip ID 不一致 (= Proxy/Relay 攻撃検出)** |
-| 24 | 組織 CRL により endorsement が失効済み |
+| 0  | 正常終了（検証成功） |
+| 20 | ARまたはTEEベンダ証明書の署名検証の失敗 |
+| 21 | 組織証明書チェーン検証の失敗（CA不一致等） |
+| 22 | **Chip ID 不一致** |
+| 24 | 組織CRLにより組織リーフ証明書が失効済み |
 | 30 | I/O / 内部エラー |
 
-詳細は `docs/design.md` の Exit Code 設計を参照。
-
----
-
-## SGX Quote の取得
-
-TEE Anchor 本体は SGX SDK に依存しませんが、入力に渡す `quote.dat` は実機の SGX で生成する必要があります。Quote 取得用の最小サンプル（環境構築自動化込み）を以下に同梱しています：
-
-- `provision/sgx/sgx_sample/` — DCAP ベースで `sgx_qe_get_quote` を 1 回呼んで `quote.dat` を吐くだけのミニサンプル
-- `provision/sgx/sgx_sample/README.md` — 詳細な導入手順とビルド方法
-
-```sh
-# (実機 SGX マシン上で)
-cd provision/sgx/sgx_sample
-make setup        # SGX SDK / DCAP ランタイム / qcnl を一括導入 (Ubuntu 24.04 / Intel APT)
-source /opt/intel/sgxsdk/environment
-make run          # quote.dat を生成
-```
-
----
-
 ## ディレクトリ構成
-
 ```
 tee-anchor/
 ├── tee_anchor.cpp              main: サブコマンド dispatch
@@ -285,7 +220,7 @@ tee-anchor/
 │   ├── sev-snp/
 │   │   ├── snp_provision.{hpp,cpp}      Report パース + ARK pin/チェーン/Report 署名検証 + CHIP_ID 抽出
 │   │   ├── amd_ark_pubkeys.hpp          AMD ARK pin (Milan/Genoa/Turin の SPKI SHA-384)
-│   │   └── snp-sample/                  Report/VCEK 取得サンプル (snpguest ラッパ; 証拠生成用)
+│   │   └── snp_sample/                  Report/VCEK 取得サンプル (snpguest ラッパ; 証拠生成用)
 │   └── cca/
 │       ├── cca_provision.{hpp,cpp}      CCA token(CBOR/COSE) パース + CPAK pin で検証 + instance-id 抽出
 │       ├── cca_cpak_pubkey.hpp          CPAK pin (QEMU dev 鍵 = TF-M cca_platform.pem, P-384)
@@ -294,10 +229,7 @@ tee-anchor/
 └── docs/                       設計ドキュメント
 ```
 
----
+性能評価に使用したベンチマークツール及びそのREADME.mdも同梱しているが、整理が全くできておらず、README.mdもClaudeに記述させたものであるため、あくまでも参考用としてのみの目的での同梱である。
 
-## ライセンス・連絡先
-
-学会投稿 (国内 CSS) を目的とした PoC 実装です。production-quality のセキュリティ保証は付きません。
-
-詳細は `CLAUDE.md` 内の連絡事項セクションを参照。
+## ライセンス
+本リポジトリはMITライセンスとする。一部で参照している[Humane-RAFW-MAA](https://github.com/acompany-develop/Humane-RAFW-MAA)や[Humane-RAFW-DCAP](https://github.com/iisec-suzaki/Humane-RAFW-DCAP)については、使用箇所をソース内で明記の上そちらのMITライセンスに準拠する。

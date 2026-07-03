@@ -35,9 +35,9 @@ REQUEST_PATH="$SCRIPT_DIR/request-data.txt"
 SNPGUEST_DIR="$HOME/snpguest"
 SNPGUEST_REPO="https://github.com/virtee/snpguest"
 
-log()  { echo -e "\033[1;32m[snp-sample]\033[0m $*"; }
-warn() { echo -e "\033[1;33m[snp-sample]\033[0m $*" >&2; }
-die()  { echo -e "\033[1;31m[snp-sample]\033[0m $*" >&2; exit 1; }
+log()  { echo -e "\033[1;32m[snp_sample]\033[0m $*"; }
+warn() { echo -e "\033[1;33m[snp_sample]\033[0m $*" >&2; }
+die()  { echo -e "\033[1;31m[snp_sample]\033[0m $*" >&2; exit 1; }
 
 # ----------------------------------------------------------------------------
 # 0. プリフライト: SEV-SNP ゲストであること

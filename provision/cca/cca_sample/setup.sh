@@ -2,7 +2,7 @@
 #
 # setup.sh — Arm CCA RME スタック（QEMU フルエミュレーション）の環境構築
 #
-# TDX/SNP サンプル (provision/tdx/tdx_sample, provision/sev-snp/snp-sample) の
+# TDX/SNP サンプル (provision/tdx/tdx_sample, provision/sev-snp/snp_sample) の
 # Arm CCA 版。ただし CCA は実機が存在しないため、QEMU(TCG) 上に
 #   TF-A(EL3) + TF-RMM(R-EL2) + Host Linux/KVM + Realm guest
 # のフルスタックを丸ごとビルドし、その中で CCA Attestation Token を生成する。
