@@ -1,6 +1,6 @@
 #pragma once
 //
-// OpenSSL 生ポインタの RAII ラッパ。CLAUDE.md の規約に従い、
+// OpenSSL 生ポインタの RAII ラッパ。本プロジェクトの規約として、
 // OpenSSL オブジェクトは必ずこれらの unique_ptr で包む。
 //
 #include <memory>
