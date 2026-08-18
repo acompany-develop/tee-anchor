@@ -1,4 +1,279 @@
 # TEE Anchor: Cross-TEE Organizational Endorsement for Mitigating TEE Physical Attacks
+
+> **Note:** This document is provided in English first. The original Japanese version is available in the latter half of this file — see [日本語版（Japanese）](#日本語版japanese).
+>
+> **注記:** 本ドキュメントは前半が英語版、後半が日本語版となっている。日本語版は[こちら](#日本語版japanese)を参照の事。
+
+This repository provides **TEE Anchor**, a standalone CLI tool that indirectly mitigates physical attacks against TEEs (Trusted Execution Environments) — such as TEE.fail and Battering RAM — by means of an additional authentication/verification mechanism built on a PKI that any organization can establish independently.
+
+TEE Anchor extracts a hardware-unique identifier (Chip ID) from the Attestation Report (AR) of a given TEE, or from the TEE-vendor-issued certificate that authenticates it (e.g. the PCK Cert in the case of Intel SGX/TDX). Separately, the organizational CA has issued (provisioned) in advance an organizational leaf certificate for each Chip ID under its management, rooted at the organizational root CA as the trust anchor. By comparing the Chip ID recorded in that issued organizational certificate against the Chip ID extracted from the AR or the TEE vendor certificate, a verifier can confirm that the Attester machine genuinely belongs to that organization. This makes it possible to guarantee, for example, that the machine is under the control of an organization that physically manages its machines under strict conditions, and thus lets the verifier be confident that the machine resides in an environment where physical attacks such as TEE.fail are infeasible.
+
+## Prerequisites
+
+* OS: Ubuntu 24.04 LTS (other Linux distributions may work, but only this one has been verified)
+* `g++` 11+ or `clang++` 14+ (C++17 required)
+* OpenSSL 3.x
+
+## Setup and Build
+
+* Install the prerequisite packages.
+    ```sh
+    sudo apt-get install -y build-essential libssl-dev
+    ```
+
+* Run the following command to produce the `tee-anchor` binary.
+    ```sh
+    make
+    ```
+
+* To remove the build artifacts, run the following command.
+    ```sh
+    make clean
+    ```
+
+## Subcommands
+
+| Subcommand | Description |
+|---|---|
+| `ca-init`   | Generates the organizational root CA key and uses it to issue the organizational root CA certificate. |
+| `provision` | Extracts the Chip ID from an AR or a TEE vendor certificate and issues an organizational leaf certificate signed by the organizational CA. The PPID is used for SGX/TDX, the CHIP_ID for SEV-SNP, and the cca-platform-instance-id for CCA. |
+| `verify`    | Confirms that the Chip IDs match, using an AR or TEE vendor certificate, the organizational leaf certificate, and the organizational root CA certificate. Optionally also performs a revocation check via a CRL. |
+| `revoke`    | Adds the serial number of an organizational certificate to the revocation list DB. |
+| `crl-issue` | Issues an X.509 CRL from the revocation list DB. |
+
+Details of each subcommand can be found via `./tee-anchor <subcmd> --help`.
+
+## Quick Start
+
+The following describes, for each of SGX, TDX, SEV-SNP, and CCA, an end-to-end walkthrough of the subcommands.
+
+### Common Step (Initializing the Organizational CA)
+
+Before proceeding to each of the flows below, initialize the organizational CA by running the following commands. All subsequent operations assume that this initialized organizational CA exists.
+
+```sh
+W=/tmp/tea_demo
+rm -rf "$W" && mkdir -p "$W"
+
+./tee-anchor ca-init --out-dir "$W"
+```
+
+### SGX
+
+As a prerequisite, place an SGX Quote at `provision/sgx/sgx_sample/quote.dat`. A script for obtaining an SGX Quote is included; if needed, follow the instructions in `provision/sgx/sgx_sample/README.md` before running it. The Quote can be obtained by running the following steps inside the `sgx_sample` directory:
+
+```sh
+sudo ./setup.sh
+source /opt/intel/sgxsdk/environment
+make
+./sample_app
+```
+
+By default this targets Azure SGX VMs, but it can also be used in other environments by configuring `sgx_default_qcnl.conf`, a PCCS, and so on. For details, see also [Humane-RAFW-DCAP](https://github.com/iisec-suzaki/Humane-RAFW-DCAP).
+
+First, here is how to exercise organizational CA initialization, provisioning, and verification without revocation handling.
+
+``` sh
+# Issue an organizational leaf certificate from the Quote (provisioning)
+./tee-anchor provision \
+    --quote   provision/sgx/sgx_sample/quote.dat \
+    --ca-key  "$W/ca.key" \
+    --ca-cert "$W/ca.crt" \
+    --out     "$W/endorsement.crt"
+
+# Perform verification. On success the exit code is 0.
+./tee-anchor verify \
+    --quote    provision/sgx/sgx_sample/quote.dat \
+    --org-cert "$W/endorsement.crt" \
+    --org-ca   "$W/ca.crt"
+echo "exit=$?"
+```
+
+The output on success looks like this:
+
+```
+verify: OK
+  tee_type       : sgx (0)
+  chip_id (hex)  : 00112233445566778899aabbccddeeff
+  ...
+```
+
+The `chip_id` shown here has been replaced with a placeholder value. In practice a different value is printed for each execution environment.
+
+To try adding a revocation, issuing a revocation list, and verification with a revocation check, start from the state where provisioning has been completed and proceed as follows:
+
+``` sh
+# Add an entry to the revocation list DB
+./tee-anchor revoke \
+    --ca-cert "$W/ca.crt" \
+    --cert    "$W/endorsement.crt" \
+    --reason  keyCompromise
+
+# Issue a CRL from the DB
+./tee-anchor crl-issue \
+    --ca-key  "$W/ca.key" \
+    --ca-cert "$W/ca.crt" \
+    --out     "$W/crl.pem"
+
+# Verification with a revocation check. The revocation is detected and the exit code becomes 24.
+./tee-anchor verify \
+    --quote    provision/sgx/sgx_sample/quote.dat \
+    --org-cert "$W/endorsement.crt" \
+    --org-ca   "$W/ca.crt" \
+    --crl      "$W/crl.pem"
+echo "exit=$?"   # → 24
+```
+
+The `--crl` option is optional; if it is not specified, no revocation check is performed, as in the earlier verification example.
+
+As is also the case for the other TEEs, in practice this verification is performed as an additional step after conventional RA-based AR verification. For example, once conventional RA verification has completed, `tee-anchor` is invoked as a subprocess to additionally confirm that the machine has been endorsed by the organization.
+
+### TDX
+
+Apart from the structure of the Quote (AR), TDX is essentially identical to SGX, so the whole flow can be run in almost the same way as for SGX.
+
+As a prerequisite, place a TD Quote at `provision/tdx/tdx_sample/quote.dat`. This too can be generated with the bundled Quote generation sample. For details, see `provision/tdx/tdx_sample/README.md`.
+
+```sh
+cd provision/tdx/tdx_sample
+sudo ./setup.sh
+make && sudo ./get_quote
+cd -
+```
+
+Note, however, that this sample can only be used on a TD where `/dev/tdx_guest` is exposed to the guest. For example, it can be used on a TD built on bare metal following Canonical's procedure, or on a GCP TD, but not on Azure, where this device is not exposed.
+
+Provisioning and verification for TDX can be performed with the following commands.
+
+```sh
+./tee-anchor provision --tee-type tdx \
+    --quote   provision/tdx/tdx_sample/quote.dat \
+    --ca-key  "$W/ca.key" \
+    --ca-cert "$W/ca.crt" \
+    --out     "$W/tdx_endorsement.crt"
+
+./tee-anchor verify --tee-type tdx \
+    --quote    provision/tdx/tdx_sample/quote.dat \
+    --org-cert "$W/tdx_endorsement.crt" \
+    --org-ca   "$W/ca.crt"
+echo "exit=$?"   # → 0
+```
+
+Adding revocations, issuing CRLs, and the additional revocation check can be performed in the same way as for SGX.
+
+### SEV-SNP
+
+For SEV-SNP as well, an AR must be prepared in advance. It can likewise be generated with the bundled sample code as follows. For details, see `provision/sev-snp/snp_sample/README.md`.
+
+```sh
+cd provision/sev-snp/snp_sample
+./get_attestation.sh # generates report.bin and certs/{ark,ask,vcek}.pem
+cd -
+```
+
+Provisioning and verification can be performed as follows. Note that, due to differences in terminology, the equivalent of `--quote` is `--report` unlike SGX/TDX, and because the TEE vendor certificates are supplied separately for SEV-SNP, an additional `--certs` option is required.
+
+```sh
+./tee-anchor provision --tee-type snp \
+    --report provision/sev-snp/snp_sample/report.bin \
+    --certs  provision/sev-snp/snp_sample/certs \
+    --ca-key  "$W/ca.key" \
+    --ca-cert "$W/ca.crt" \
+    --out     "$W/snp_endorsement.crt"
+    
+./tee-anchor verify --tee-type snp \
+    --report   provision/sev-snp/snp_sample/report.bin \
+    --certs    provision/sev-snp/snp_sample/certs \
+    --org-cert "$W/snp_endorsement.crt" \
+    --org-ca   "$W/ca.crt"
+echo "exit=$?"   # → 0
+```
+
+Revocation-related operations are the same as for SGX and TDX.
+
+### CCA
+
+For CCA, as of June 2026 no real hardware exists, so the Token (AR) is obtained from a Realm running on a full-emulation environment provided by QEMU. The Token is in CBOR format and is signed with a fixed, predetermined CPAK private key, so the corresponding CPAK public key is hardcoded and used for verification.
+
+Since this Token is required first, generate it using the bundled script below. For details, see `provision/cca/cca_sample/README.md`.
+
+```sh
+cd provision/cca/cca_sample
+make setup # first time only; takes a considerable amount of time
+make token
+cd -
+```
+
+In particular, when running inside a cloud VM or similar, QEMU full emulation runs inside the VM and a Realm runs inside that in turn, resulting in multiply nested virtualization, so `make setup` takes an extremely long time. On a VM it is recommended to allocate a fairly generous amount of vCPU resources, or to run this on bare metal.
+
+Provisioning and verification can be performed as follows. Note that, due to differences in terminology, the equivalent of `--quote` is `--token` unlike SGX/TDX.
+
+``` sh
+./tee-anchor provision --tee-type cca \
+    --token   provision/cca/cca_sample/cca-token.cbor \
+    --ca-key  "$W/ca.key" \
+    --ca-cert "$W/ca.crt" \
+    --out     "$W/cca_endorsement.crt"
+
+./tee-anchor verify --tee-type cca \
+    --token    provision/cca/cca_sample/cca-token.cbor \
+    --org-cert "$W/cca_endorsement.crt" \
+    --org-ca   "$W/ca.crt"
+echo "exit=$?"   # → 0
+```
+
+Revocation-related operations are the same as for the other TEEs.
+
+## Exit Codes of the `verify` Subcommand
+
+| code | Meaning |
+|---:|---|
+| 0  | Normal termination (verification succeeded) |
+| 20 | Signature verification of the AR or TEE vendor certificate failed |
+| 21 | Organizational certificate chain verification failed (e.g. CA mismatch) |
+| 22 | **Chip ID mismatch** |
+| 24 | The organizational leaf certificate has been revoked by the organizational CRL |
+| 30 | I/O / internal error |
+
+## Directory Layout
+
+```
+tee-anchor/
+├── tee_anchor.cpp              main: subcommand dispatch
+├── Makefile
+├── common/                     shared headers (RAII, exceptions, I/O, PKI utilities)
+├── ca/                         ca-init / revoke / crl-issue
+├── binding/                    DER encoding/decoding of the ChipIdBinding extension
+├── provision/                  provision subcommand (+ TEE-specific processing)
+│   ├── sgx/
+│   │   ├── sgx_provision.{hpp,cpp}      Quote parsing + PCK chain verification + PPID extraction
+│   │   ├── intel_sgx_root_pubkey.hpp    Intel SGX Root CA public key (identical to QvE's)
+│   │   └── sgx_sample/                  minimal sample for obtaining a Quote
+│   ├── tdx/
+│   │   ├── tdx_provision.{hpp,cpp}      TD Quote (v4/v5) parsing + PCK chain extraction (verification/PPID reuse the sgx code)
+│   │   └── tdx_sample/                  sample for obtaining a TD Quote (libtdx_attest)
+│   ├── sev-snp/
+│   │   ├── snp_provision.{hpp,cpp}      Report parsing + ARK pin/chain/Report signature verification + CHIP_ID extraction
+│   │   ├── amd_ark_pubkeys.hpp          AMD ARK pins (SPKI SHA-384 for Milan/Genoa/Turin)
+│   │   └── snp_sample/                  sample for obtaining a Report/VCEK (snpguest wrapper; for evidence generation)
+│   └── cca/
+│       ├── cca_provision.{hpp,cpp}      CCA token (CBOR/COSE) parsing + verification with the CPAK pin + instance-id extraction
+│       ├── cca_cpak_pubkey.hpp          CPAK pin (QEMU dev key = TF-M cca_platform.pem, P-384)
+│       └── cca_sample/                  sample for obtaining a CCA token (QEMU RME stack + headless driver)
+├── verify/                     verify subcommand
+└── docs/                       design documents
+```
+
+The benchmark tool used for the performance evaluation and its README.md are also bundled, but they have not been organized at all and the README.md was written by Claude, so they are included strictly for reference purposes only.
+
+## License
+
+This repository is licensed under the MIT License. For the parts that reference [Humane-RAFW-MAA](https://github.com/acompany-develop/Humane-RAFW-MAA) and [Humane-RAFW-DCAP](https://github.com/iisec-suzaki/Humane-RAFW-DCAP), the relevant locations are noted in the source and those parts conform to their respective MIT Licenses.
+
+---
+
+# 日本語版（Japanese）
+
 本リポジトリは、任意の組織が独自に形成可能なPKIベースの追加の認証・検証機構により、TEE（Trusted Execution Environment）に対するTEE.failやBattering RAMといった物理攻撃を間接的に予防する事のできるスタンドアロンCLIツール「TEE Anchor」を提供する。
 
 TEE Anchorは、各種TEEのAttestation Report（AR）またはそれを認証するTEEベンダ発行の証明書（例：Intel SGX/TDXであればPCK Cert）から、そのハードウェア固有のID（Chip ID）を抽出する。一方、組織CAは予め管理対象のChip IDに対し、組織ルートCAをトラストアンカーとした組織リーフ証明書を発行（プロビジョニング）している。この発行した組織証明書内のChip IDと、ARまたはTEEベンダ証明書から抽出したChip IDを比較する事で、真にその組織に当該Attesterマシンが属しているかを検証できる。これにより、例えばマシンを物理的に厳重に管理している組織の管理下にそのマシンがある事を保証する事ができ、ひいてはTEE.failのような物理攻撃が不可能な環境下にある事を検証者は確信する事ができる。
