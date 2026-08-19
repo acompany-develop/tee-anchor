@@ -8,15 +8,13 @@
 namespace tee_anchor::provision {
 
 struct ProvisionArgs {
-    // SGX/TDX 用入力
-    std::string quote_path;          // --quote (tee-type=sgx|tdx)
+    // Attestation Report (AR) の入力パス。TEE ごとに呼称は異なる
+    // (SGX/TDX: Quote / SEV-SNP: Report / CCA: Token) が、いずれも AR そのもの
+    // であるため CLI オプションは --report に統一する。
+    std::string report_path;         // --report (全 tee-type 共通)
 
-    // SEV-SNP 用入力
-    std::string report_path;         // --report (tee-type=snp)
+    // SEV-SNP 用の追加入力 (AR とは別に TEE ベンダ証明書が別添となるため)
     std::string certs_dir;           // --certs  (tee-type=snp; ark.pem/ask.pem/vcek.pem)
-
-    // Arm CCA 用入力
-    std::string token_path;          // --token (tee-type=cca; cca-token.cbor)
 
     // 共通
     std::string ca_key_path;         // --ca-key

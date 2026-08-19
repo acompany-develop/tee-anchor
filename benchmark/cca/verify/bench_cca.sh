@@ -111,7 +111,7 @@ log "sanity: evcli cca check"
 "$EVCLI" cca check -t "$TOKEN" -k "$CPAK_JWK" -c "$CLAIMS_OUT" \
     || die "evcli cca check が失敗しました。token/CPAK の整合を確認してください。"
 log "sanity: tee-anchor verify --tee-type cca"
-"$TEE_ANCHOR" verify --tee-type cca --token "$TOKEN" --org-cert "$ORG_CERT" --org-ca "$ORG_CA" \
+"$TEE_ANCHOR" verify --tee-type cca --report "$TOKEN" --org-cert "$ORG_CERT" --org-ca "$ORG_CA" \
     || die "tee-anchor verify (cca) が失敗しました。endorsement/CA の整合を確認してください。"
 echo
 
@@ -124,7 +124,7 @@ hyperfine -N \
     --command-name "A. evcli cca check (conventional RA)" \
         "$EVCLI cca check -t $TOKEN -k $CPAK_JWK -c $CLAIMS_OUT" \
     --command-name "B. tee-anchor verify (cca)" \
-        "$TEE_ANCHOR verify --tee-type cca --token $TOKEN --org-cert $ORG_CERT --org-ca $ORG_CA" \
+        "$TEE_ANCHOR verify --tee-type cca --report $TOKEN --org-cert $ORG_CERT --org-ca $ORG_CA" \
     --export-markdown "${OUT_PREFIX}.md" \
     --export-json "${OUT_PREFIX}.json"
 

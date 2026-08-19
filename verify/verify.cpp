@@ -52,14 +52,15 @@ std::vector<uint8_t> ppid_from_pck_chain(const std::vector<X509Ptr>& chain) {
 // TEE 種別ごとに検証経路が異なるが、いずれも「検証通過後にだけ Chip ID を返す」。
 // 検証失敗時は TeeAnchorError (呼び出し側で exit 20 に変換)。
 std::vector<uint8_t> verify_evidence_and_extract_chip_id(const VerifyArgs& args) {
+    // AR の入力パスは TEE 種別に依らず args.report_path (--report) に統一されている。
     if (args.tee_type == "sgx") {
-        auto quote = read_file(args.quote_path);
+        auto quote = read_file(args.report_path);
         return ppid_from_pck_chain(sgx::extract_pck_chain_from_quote(quote));
     }
     if (args.tee_type == "tdx") {
         // SGX とほぼ同じ。差は TD Quote のフレーミング(v4/v5)と二重ネストした
         // Certification Data の降り方だけで、それは tdx::extract_pck_chain_from_quote が吸収する。
-        auto quote = read_file(args.quote_path);
+        auto quote = read_file(args.report_path);
         return ppid_from_pck_chain(tdx::extract_pck_chain_from_quote(quote));
     }
     if (args.tee_type == "snp") {
@@ -72,7 +73,7 @@ std::vector<uint8_t> verify_evidence_and_extract_chip_id(const VerifyArgs& args)
     if (args.tee_type == "cca") {
         // provision と同じ検証経路を再利用 (CPAK pin で COSE_Sign1/ES384 検証)。
         // verify では CPAK leaf は不要なので instance-id のみ受け取る。
-        cca::CcaVerifyResult r = cca::verify_and_extract(args.token_path);
+        cca::CcaVerifyResult r = cca::verify_and_extract(args.report_path);
         return std::move(r.instance_id);
     }
     throw TeeAnchorError("unknown --tee-type: " + args.tee_type);
@@ -146,16 +147,15 @@ int run_verify(const VerifyArgs& args) {
     try {
         require(args.org_cert_path, "--org-cert");
         require(args.org_ca_path,   "--org-ca");
-        // TEE 種別ごとに証拠の入力が異なる (SGX/TDX: Quote / SNP: Report + 証明書dir / CCA: token)。
-        if (args.tee_type == "sgx" || args.tee_type == "tdx") {
-            require(args.quote_path, "--quote");
-        } else if (args.tee_type == "snp") {
-            require(args.report_path, "--report");
-            require(args.certs_dir,   "--certs");
-        } else if (args.tee_type == "cca") {
-            require(args.token_path, "--token");
-        } else {
+        // AR の入力は全 TEE 共通で --report。SNP のみ TEE ベンダ証明書が別添なので
+        // 追加で --certs を要求する。
+        if (args.tee_type != "sgx" && args.tee_type != "tdx" &&
+            args.tee_type != "snp" && args.tee_type != "cca") {
             throw TeeAnchorError("unknown --tee-type: " + args.tee_type);
+        }
+        require(args.report_path, "--report");
+        if (args.tee_type == "snp") {
+            require(args.certs_dir, "--certs");
         }
     } catch (const std::exception& e) {
         std::fprintf(stderr, "[error] %s\n", e.what());
@@ -275,9 +275,7 @@ int cli_verify(int argc, char** argv) {
     try {
         for (int i = 0; i < argc; ++i) {
             std::string a = argv[i];
-            if      (a == "--quote")    args.quote_path    = need_value(i, "--quote");
-            else if (a == "--token")    args.token_path    = need_value(i, "--token");
-            else if (a == "--report")   args.report_path   = need_value(i, "--report");
+            if      (a == "--report")   args.report_path   = need_value(i, "--report");
             else if (a == "--certs")    args.certs_dir     = need_value(i, "--certs");
             else if (a == "--org-cert") args.org_cert_path = need_value(i, "--org-cert");
             else if (a == "--org-ca")   args.org_ca_path   = need_value(i, "--org-ca");
@@ -286,28 +284,27 @@ int cli_verify(int argc, char** argv) {
             else if (a == "-h" || a == "--help") {
                 std::printf(
                     "Usage:\n"
-                    "  tee-anchor verify --tee-type sgx --quote <file> --org-cert <file> --org-ca <file> [options]\n"
-                    "  tee-anchor verify --tee-type tdx --quote <file> --org-cert <file> --org-ca <file> [options]\n"
+                    "  tee-anchor verify --tee-type sgx --report <file> --org-cert <file> --org-ca <file> [options]\n"
+                    "  tee-anchor verify --tee-type tdx --report <file> --org-cert <file> --org-ca <file> [options]\n"
                     "  tee-anchor verify --tee-type snp --report <file> --certs <dir> --org-cert <file> --org-ca <file> [options]\n"
-                    "  tee-anchor verify --tee-type cca --token <file> --org-cert <file> --org-ca <file> [options]\n"
+                    "  tee-anchor verify --tee-type cca --report <file> --org-cert <file> --org-ca <file> [options]\n"
                     "\n"
                     "Common options:\n"
+                    "  --report <file>        (required) attestation report (AR) of the attester machine.\n"
+                    "                         The per-TEE evidence is passed with this single option:\n"
+                    "                           sgx: SGX Quote      (binary, e.g. quote.dat)\n"
+                    "                           tdx: TD Quote       (binary, e.g. quote.dat)\n"
+                    "                           snp: SNP report     (binary, report.bin)\n"
+                    "                           cca: CCA token      (CBOR, cca-token.cbor)\n"
                     "  --org-cert <file>      (required) organization endorsement cert (PEM)\n"
                     "  --org-ca <file>        (required) organization root CA cert (PEM, trust anchor)\n"
                     "  --crl <file>           organization CRL (PEM). When given, endorsement is also\n"
                     "                         checked against this CRL (exit 24 if revoked).\n"
                     "  --tee-type <sgx|tdx|snp|cca>  TEE type (default: sgx)\n"
                     "\n"
-                    "SGX/TDX options (--tee-type sgx | tdx):\n"
-                    "  --quote <file>         (required) SGX Quote or TD Quote (binary, quote.dat)\n"
-                    "\n"
                     "SEV-SNP options (--tee-type snp):\n"
-                    "  --report <file>        (required) SNP attestation report (binary, report.bin)\n"
                     "  --certs <dir>          (required) dir with ark.pem/ask.pem/vcek.pem\n"
                     "                         (chain + report signature verified natively)\n"
-                    "\n"
-                    "Arm CCA options (--tee-type cca):\n"
-                    "  --token <file>         (required) CCA attestation token (CBOR, cca-token.cbor)\n"
                     "\n"
                     "Exit codes:\n"
                     "  0   all checks passed\n"

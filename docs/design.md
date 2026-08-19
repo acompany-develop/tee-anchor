@@ -168,6 +168,11 @@ Phase 1 では DER エンコード済みのバイト列を OCTET STRING にそ�
 ### `tee-anchor provision`
 
 共通引数：
+- `--report <file>` (required): AR（Attestation Report）。TEE 種別に依らずこの 1 つのオプションで渡す
+  - `sgx`: SGX Quote（バイナリ、`quote.dat`）
+  - `tdx`: TD Quote（バイナリ、`quote.dat`）
+  - `snp`: SNP Attestation Report（バイナリ、`report.bin`）
+  - `cca`: CCA Attestation Token（CBOR、`cca-token.cbor`）
 - `--ca-key <file>` (required): 組織 CA 秘密鍵
 - `--ca-cert <file>` (required): 組織 CA 証明書
 - `--out <file>` (required): 出力先（組織エンドースメント証明書、PEM）
@@ -175,15 +180,10 @@ Phase 1 では DER エンコード済みのバイト列を OCTET STRING にそ�
 - `--validity-days <N>`: 有効期限（デフォルト 365）
 - `--tee-type <sgx|tdx|snp|cca>`: TEE 種別（デフォルト `sgx`）
 
-SGX / TDX 用引数（`--tee-type sgx | tdx`）：
-- `--quote <file>` (required): 入力する Quote（バイナリ、`quote.dat`）。SGX Quote / TD Quote のどちらでも可
-
 SEV-SNP 用引数（`--tee-type snp`）：
-- `--report <file>` (required): Attestation Report（バイナリ、`report.bin`）
 - `--certs <dir>` (required): `ark.pem` / `ask.pem` / `vcek.pem` を含むディレクトリ（AMD KDS から取得。チェーン/署名検証はインプロセスで行う）
 
-Arm CCA 用引数（`--tee-type cca`）：
-- `--token <file>` (required): CCA Attestation Token（CBOR、`cca-token.cbor`）
+設計判断（AR の受け渡し）: TEE ごとに AR の呼称は Quote / Report / Token と異なるが、CLI としてはいずれも「AR そのもの」であるため `--report` 1 つに統一する。TEE 種別の切り替えは `--tee-type` のみで表現し、オプション名は変えない。
 
 設計判断（SGX/TDX）: 入力は `quote.dat` 1 つに統一する。Quote の Certification Data に PCK 証明書チェーンが内包されており（SGX: `cert_key_type==5` / TDX: 外側 `type=6` の中の内側 `type=5`）、別途 PCS / PCCS から PCK 証明書を取得する必要がないため。
 設計判断（SNP）: SNP の Report には証明書チェーンが含まれないため、KDS から取得した VCEK チェーン（`certs/`）を Report と併せて入力に取る。
@@ -228,23 +228,21 @@ CRL は本サブコマンドでは確認しない。理由は本ドキュメン�
 
 ### `tee-anchor verify`
 
-provision と同じく証拠の入力が TEE 種別で異なる。検証は「(1) ベンダー証拠検証 + Chip ID 抽出 → (2) 組織 chain 検証(+任意 CRL) → (3) Chip ID bit-for-bit 照合」の 3 段で、(1) だけが TEE 別、(2)(3) は共通。
+provision と同じく AR は `--report` で受け取り（SNP のみ `--certs` が追加で必要）、内部の検証経路が TEE 種別で異なる。検証は「(1) ベンダー証拠検証 + Chip ID 抽出 → (2) 組織 chain 検証(+任意 CRL) → (3) Chip ID bit-for-bit 照合」の 3 段で、(1) だけが TEE 別、(2)(3) は共通。
 
 共通引数：
+- `--report <file>` (required): AR（Attestation Report）。provision と同じく TEE 種別に依らずこの 1 つのオプションで渡す
+  - `sgx`: SGX Quote（バイナリ、`quote.dat`）
+  - `tdx`: TD Quote（バイナリ、`quote.dat`）
+  - `snp`: SNP Attestation Report（バイナリ、`report.bin`）
+  - `cca`: CCA Attestation Token（CBOR、`cca-token.cbor`）
 - `--org-cert <file>` (required): 組織エンドースメント証明書（PEM）
 - `--org-ca <file>` (required): 組織 Root CA 証明書（PEM、trust anchor）
 - `--crl <file>`: 組織 CRL（PEM、任意。指定時のみ失効チェックを行い、失効なら exit 24）
 - `--tee-type <sgx|tdx|snp|cca>`: TEE 種別（デフォルト `sgx`）
 
-SGX / TDX 用引数（`--tee-type sgx | tdx`）：
-- `--quote <file>` (required): SGX Quote / TD Quote（バイナリ）
-
 SEV-SNP 用引数（`--tee-type snp`）：
-- `--report <file>` (required): SNP Attestation Report（バイナリ、`report.bin`）
 - `--certs <dir>` (required): `ark.pem` / `ask.pem` / `vcek.pem` を含むディレクトリ（チェーン/署名検証はインプロセス）
-
-Arm CCA 用引数（`--tee-type cca`）：
-- `--token <file>` (required): CCA Attestation Token（CBOR、`cca-token.cbor`）
 
 処理（SGX）：
 1. Quote をパース、CERT_DATA から PCK Cert チェーンを抽出 → Intel Root CA(ハードコード公開鍵)で検証 → PPID を抽出

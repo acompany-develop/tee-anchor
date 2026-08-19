@@ -43,6 +43,8 @@ TEE Anchor extracts a hardware-unique identifier (Chip ID) from the Attestation 
 
 Details of each subcommand can be found via `./tee-anchor <subcmd> --help`.
 
+For `provision` and `verify`, the AR is always passed with the single `--report` option regardless of the TEE type: an SGX Quote for `--tee-type sgx`, a TD Quote for `tdx`, an attestation report (`report.bin`) for `snp`, and a CCA token (`cca-token.cbor`) for `cca`. Only SEV-SNP needs the extra `--certs` option, because its TEE vendor certificates are supplied separately from the AR.
+
 ## Quick Start
 
 The following describes, for each of SGX, TDX, SEV-SNP, and CCA, an end-to-end walkthrough of the subcommands.
@@ -76,14 +78,14 @@ First, here is how to exercise organizational CA initialization, provisioning, a
 ``` sh
 # Issue an organizational leaf certificate from the Quote (provisioning)
 ./tee-anchor provision \
-    --quote   provision/sgx/sgx_sample/quote.dat \
+    --report  provision/sgx/sgx_sample/quote.dat \
     --ca-key  "$W/ca.key" \
     --ca-cert "$W/ca.crt" \
     --out     "$W/endorsement.crt"
 
 # Perform verification. On success the exit code is 0.
 ./tee-anchor verify \
-    --quote    provision/sgx/sgx_sample/quote.dat \
+    --report   provision/sgx/sgx_sample/quote.dat \
     --org-cert "$W/endorsement.crt" \
     --org-ca   "$W/ca.crt"
 echo "exit=$?"
@@ -117,7 +119,7 @@ To try adding a revocation, issuing a revocation list, and verification with a r
 
 # Verification with a revocation check. The revocation is detected and the exit code becomes 24.
 ./tee-anchor verify \
-    --quote    provision/sgx/sgx_sample/quote.dat \
+    --report   provision/sgx/sgx_sample/quote.dat \
     --org-cert "$W/endorsement.crt" \
     --org-ca   "$W/ca.crt" \
     --crl      "$W/crl.pem"
@@ -147,13 +149,13 @@ Provisioning and verification for TDX can be performed with the following comman
 
 ```sh
 ./tee-anchor provision --tee-type tdx \
-    --quote   provision/tdx/tdx_sample/quote.dat \
+    --report  provision/tdx/tdx_sample/quote.dat \
     --ca-key  "$W/ca.key" \
     --ca-cert "$W/ca.crt" \
     --out     "$W/tdx_endorsement.crt"
 
 ./tee-anchor verify --tee-type tdx \
-    --quote    provision/tdx/tdx_sample/quote.dat \
+    --report   provision/tdx/tdx_sample/quote.dat \
     --org-cert "$W/tdx_endorsement.crt" \
     --org-ca   "$W/ca.crt"
 echo "exit=$?"   # → 0
@@ -171,7 +173,7 @@ cd provision/sev-snp/snp_sample
 cd -
 ```
 
-Provisioning and verification can be performed as follows. Note that, due to differences in terminology, the equivalent of `--quote` is `--report` unlike SGX/TDX, and because the TEE vendor certificates are supplied separately for SEV-SNP, an additional `--certs` option is required.
+Provisioning and verification can be performed as follows. Note that, because the TEE vendor certificates are supplied separately for SEV-SNP, an additional `--certs` option is required in addition to `--report`.
 
 ```sh
 ./tee-anchor provision --tee-type snp \
@@ -206,17 +208,17 @@ cd -
 
 In particular, when running inside a cloud VM or similar, QEMU full emulation runs inside the VM and a Realm runs inside that in turn, resulting in multiply nested virtualization, so `make setup` takes an extremely long time. On a VM it is recommended to allocate a fairly generous amount of vCPU resources, or to run this on bare metal.
 
-Provisioning and verification can be performed as follows. Note that, due to differences in terminology, the equivalent of `--quote` is `--token` unlike SGX/TDX.
+Provisioning and verification can be performed as follows. As with the other TEEs, the CCA token is passed with `--report`.
 
 ``` sh
 ./tee-anchor provision --tee-type cca \
-    --token   provision/cca/cca_sample/cca-token.cbor \
+    --report  provision/cca/cca_sample/cca-token.cbor \
     --ca-key  "$W/ca.key" \
     --ca-cert "$W/ca.crt" \
     --out     "$W/cca_endorsement.crt"
 
 ./tee-anchor verify --tee-type cca \
-    --token    provision/cca/cca_sample/cca-token.cbor \
+    --report   provision/cca/cca_sample/cca-token.cbor \
     --org-cert "$W/cca_endorsement.crt" \
     --org-ca   "$W/ca.crt"
 echo "exit=$?"   # → 0
@@ -310,6 +312,8 @@ TEE Anchorは、各種TEEのAttestation Report（AR）またはそれを認証�
 
 各サブコマンドの詳細は`./tee-anchor <subcmd> --help`で確認可能。
 
+`provision`及び`verify`において、ARはTEE種別に依らず常に`--report`オプション1つで渡す（`--tee-type sgx`ではSGX Quote、`tdx`ではTD Quote、`snp`ではAttestation Report（`report.bin`）、`cca`ではToken（`cca-token.cbor`）を指定する）。SEV-SNPのみ、TEEベンダ証明書がARと別添であるため追加で`--certs`オプションが必要となる。
+
 ## クイックスタート
 以下に、SGX、TDX、SEV-SNP、CCAそれぞれの場合における、各サブコマンドの一連の確認手順の説明を行う。
 
@@ -336,14 +340,14 @@ make
 ``` sh
 # Quoteから組織リーフ証明書を発行（プロビジョニング）
 ./tee-anchor provision \
-    --quote   provision/sgx/sgx_sample/quote.dat \
+    --report  provision/sgx/sgx_sample/quote.dat \
     --ca-key  "$W/ca.key" \
     --ca-cert "$W/ca.crt" \
     --out     "$W/endorsement.crt"
 
 # 検証を実施する。成功すればExit Codeは0。
 ./tee-anchor verify \
-    --quote    provision/sgx/sgx_sample/quote.dat \
+    --report   provision/sgx/sgx_sample/quote.dat \
     --org-cert "$W/endorsement.crt" \
     --org-ca   "$W/ca.crt"
 echo "exit=$?"
@@ -374,7 +378,7 @@ verify: OK
 
 # 失効確認付き検証。失効を検出してExit Codeが24となる。
 ./tee-anchor verify \
-    --quote    provision/sgx/sgx_sample/quote.dat \
+    --report   provision/sgx/sgx_sample/quote.dat \
     --org-cert "$W/endorsement.crt" \
     --org-ca   "$W/ca.crt" \
     --crl      "$W/crl.pem"
@@ -399,13 +403,13 @@ cd -
 以下のコマンドにより、TDX用のプロビジョニング及び検証を実施できる。
 ```sh
 ./tee-anchor provision --tee-type tdx \
-    --quote   provision/tdx/tdx_sample/quote.dat \
+    --report  provision/tdx/tdx_sample/quote.dat \
     --ca-key  "$W/ca.key" \
     --ca-cert "$W/ca.crt" \
     --out     "$W/tdx_endorsement.crt"
 
 ./tee-anchor verify --tee-type tdx \
-    --quote    provision/tdx/tdx_sample/quote.dat \
+    --report   provision/tdx/tdx_sample/quote.dat \
     --org-cert "$W/tdx_endorsement.crt" \
     --org-ca   "$W/ca.crt"
 echo "exit=$?"   # → 0
@@ -421,7 +425,7 @@ cd provision/sev-snp/snp_sample
 cd -
 ```
 
-プロビジョニングと検証は以下のように実施できる。用語の違いから、SGX/TDXと異なり、`--quote`サブコマンド相当が`--report`、そしてSEV-SNPではTEEベンダ証明書が別添である事から追加で`--certs`サブコマンドが必要となる点に注意。
+プロビジョニングと検証は以下のように実施できる。SEV-SNPではTEEベンダ証明書が別添である事から、`--report`に加えて`--certs`オプションが追加で必要となる点に注意。
 ```sh
 ./tee-anchor provision --tee-type snp \
     --report provision/sev-snp/snp_sample/report.bin \
@@ -451,16 +455,16 @@ cd -
 ```
 特にクラウド等のVM内で実行する場合、VM内でQEMUのフルエミュレーションを実行しさらにその中でRealmを動かすという多重Nested仮想化状態となるため、`make setup`に極めて長い時間がかかる。VMの場合かなり多めのvCPUリソースを積むか、ベアメタル上で実施する事を推奨。
 
-プロビジョニングと検証は以下のように実施できる。用語の違いから、SGX/TDXと異なり、`--quote`サブコマンド相当が`--token`である点に注意。
+プロビジョニングと検証は以下のように実施できる。CCAのTokenも他のTEEと同様に`--report`で渡す。
 ``` sh
 ./tee-anchor provision --tee-type cca \
-    --token   provision/cca/cca_sample/cca-token.cbor \
+    --report  provision/cca/cca_sample/cca-token.cbor \
     --ca-key  "$W/ca.key" \
     --ca-cert "$W/ca.crt" \
     --out     "$W/cca_endorsement.crt"
 
 ./tee-anchor verify --tee-type cca \
-    --token    provision/cca/cca_sample/cca-token.cbor \
+    --report   provision/cca/cca_sample/cca-token.cbor \
     --org-cert "$W/cca_endorsement.crt" \
     --org-ca   "$W/ca.crt"
 echo "exit=$?"   # → 0

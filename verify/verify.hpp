@@ -27,15 +27,13 @@
 namespace tee_anchor::verify {
 
 struct VerifyArgs {
-    // SGX 用証拠
-    std::string quote_path;       // --quote (tee-type=sgx)
+    // Attestation Report (AR) の入力パス。TEE ごとに呼称は異なる
+    // (SGX/TDX: Quote / SEV-SNP: Report / CCA: Token) が、いずれも AR そのもの
+    // であるため CLI オプションは --report に統一する。
+    std::string report_path;      // --report (全 tee-type 共通)
 
-    // SEV-SNP 用証拠
-    std::string report_path;      // --report (tee-type=snp)
+    // SEV-SNP 用の追加証拠 (AR とは別に TEE ベンダ証明書が別添となるため)
     std::string certs_dir;        // --certs  (tee-type=snp; ark.pem/ask.pem/vcek.pem)
-
-    // Arm CCA 用証拠
-    std::string token_path;       // --token (tee-type=cca; cca-token.cbor)
 
     // 共通
     std::string org_cert_path;    // --org-cert

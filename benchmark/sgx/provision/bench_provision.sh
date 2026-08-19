@@ -3,7 +3,7 @@
 # 証明書の発行）のプロセスレベル計測。
 #
 # 計測対象:
-#   tee-anchor provision --tee-type sgx --quote <quote> \
+#   tee-anchor provision --tee-type sgx --report <quote> \
 #       --ca-key <ca.key> --ca-cert <ca.crt> --out <endorsement.crt>
 #
 # 内訳 (支配項):
@@ -100,9 +100,9 @@ PREP_RM="rm -f $OUT_CRT"
 
 # 健全性チェック: provision が 1 回成功し verify が通るか（クリーンな状態から）
 $PREP_RM
-if "$TEE_ANCHOR" provision --tee-type sgx --quote "$QUOTE" \
+if "$TEE_ANCHOR" provision --tee-type sgx --report "$QUOTE" \
         --ca-key "$CA_KEY" --ca-cert "$CA_CERT" --out "$OUT_CRT" >/dev/null 2>&1; then
-    if "$TEE_ANCHOR" verify --tee-type sgx --quote "$QUOTE" \
+    if "$TEE_ANCHOR" verify --tee-type sgx --report "$QUOTE" \
             --org-cert "$OUT_CRT" --org-ca "$CA_CERT" >/dev/null 2>&1; then
         log "sanity: provision→verify OK（発行した endorsement が Chip ID 照合に成功）"
     else
@@ -132,7 +132,7 @@ if command -v hyperfine >/dev/null 2>&1; then
         --min-runs "$RUNS" \
         --prepare "$PREP_RM" \
         --command-name "provision (sgx)" \
-            "$TEE_ANCHOR provision --tee-type sgx --quote $QUOTE --ca-key $CA_KEY --ca-cert $CA_CERT --out $OUT_CRT" \
+            "$TEE_ANCHOR provision --tee-type sgx --report $QUOTE --ca-key $CA_KEY --ca-cert $CA_CERT --out $OUT_CRT" \
         --export-markdown "${OUT_PREFIX}.md" \
         --export-json "${OUT_PREFIX}.json"
     echo
@@ -166,7 +166,7 @@ else
                        runs, '"$WARMUP"', name, mean, sd, mn, med, mx > "'"${OUT_PREFIX}.json"'"
             }'
     }
-    bench_one "provision (sgx)" "$TEE_ANCHOR" provision --tee-type sgx --quote "$QUOTE" \
+    bench_one "provision (sgx)" "$TEE_ANCHOR" provision --tee-type sgx --report "$QUOTE" \
         --ca-key "$CA_KEY" --ca-cert "$CA_CERT" --out "$OUT_CRT"
     echo
     log "結果を ${OUT_PREFIX}.json に保存しました。"

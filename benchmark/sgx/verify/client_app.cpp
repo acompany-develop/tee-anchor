@@ -1181,7 +1181,7 @@ static int tee_anchor_verify_once(bool with_crl = false)
 {
     std::string cmd = g_bench.tee_anchor_bin
         + " verify --tee-type sgx"
-        + " --quote " + g_bench.quote_out
+        + " --report " + g_bench.quote_out
         + " --org-cert " + g_bench.org_cert
         + " --org-ca " + g_bench.org_ca;
     if(with_crl)

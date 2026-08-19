@@ -650,7 +650,7 @@ def _tee_anchor_once(quote_path: str, with_crl: bool = False) -> int:
     with_crl=True のときは --crl <ORG_CRL> を付け、失効リスト照合も行わせる
     (失効済みなら exit 24)。SGX 版 tee_anchor_verify_once(with_crl) と同思想。"""
     cmd = [TEE_ANCHOR_BIN, "verify", "--tee-type", "tdx",
-           "--quote", quote_path, "--org-cert", ORG_CERT_PATH, "--org-ca", ORG_CA_PATH]
+           "--report", quote_path, "--org-cert", ORG_CERT_PATH, "--org-ca", ORG_CA_PATH]
     if with_crl:
         cmd += ["--crl", ORG_CRL_PATH]
     return subprocess.run(

@@ -102,10 +102,11 @@ ChipIdResult extract_chip_id_for_cca(const std::string& token_path) {
 }
 
 ChipIdResult extract_chip_id(const ProvisionArgs& args) {
-    if (args.tee_type == "sgx") return extract_chip_id_for_sgx(args.quote_path);
-    if (args.tee_type == "tdx") return extract_chip_id_for_tdx(args.quote_path);
+    // AR の入力パスは TEE 種別に依らず args.report_path (--report) に統一されている。
+    if (args.tee_type == "sgx") return extract_chip_id_for_sgx(args.report_path);
+    if (args.tee_type == "tdx") return extract_chip_id_for_tdx(args.report_path);
     if (args.tee_type == "snp") return extract_chip_id_for_snp(args);
-    if (args.tee_type == "cca") return extract_chip_id_for_cca(args.token_path);
+    if (args.tee_type == "cca") return extract_chip_id_for_cca(args.report_path);
     throw TeeAnchorError("unknown --tee-type: " + args.tee_type);
 }
 
@@ -122,14 +123,15 @@ void run_provision(const ProvisionArgs& args) {
     auto require = [](const std::string& v, const char* name) {
         if (v.empty()) throw TeeAnchorError(std::string(name) + " is required");
     };
-    // TEE 種別ごとに証拠の入力が異なる (SGX/TDX: Quote 単体 / SNP: Report + 証明書dir)。
-    if (args.tee_type == "sgx" || args.tee_type == "tdx") {
-        require(args.quote_path, "--quote");
-    } else if (args.tee_type == "snp") {
-        require(args.report_path, "--report");
-        require(args.certs_dir,   "--certs");
-    } else if (args.tee_type == "cca") {
-        require(args.token_path, "--token");
+    if (args.tee_type != "sgx" && args.tee_type != "tdx" &&
+        args.tee_type != "snp" && args.tee_type != "cca") {
+        throw TeeAnchorError("unknown --tee-type: " + args.tee_type);
+    }
+    // AR の入力は全 TEE 共通で --report。SNP のみ TEE ベンダ証明書が別添なので
+    // 追加で --certs を要求する。
+    require(args.report_path, "--report");
+    if (args.tee_type == "snp") {
+        require(args.certs_dir, "--certs");
     }
     require(args.ca_key_path,  "--ca-key");
     require(args.ca_cert_path, "--ca-cert");
@@ -236,9 +238,7 @@ int cli_provision(int argc, char** argv) {
     try {
         for (int i = 0; i < argc; ++i) {
             std::string a = argv[i];
-            if      (a == "--quote")         args.quote_path     = need_value(i, "--quote");
-            else if (a == "--token")         args.token_path     = need_value(i, "--token");
-            else if (a == "--report")        args.report_path    = need_value(i, "--report");
+            if      (a == "--report")        args.report_path    = need_value(i, "--report");
             else if (a == "--certs")         args.certs_dir      = need_value(i, "--certs");
             else if (a == "--ca-key")        args.ca_key_path    = need_value(i, "--ca-key");
             else if (a == "--ca-cert")       args.ca_cert_path   = need_value(i, "--ca-cert");
@@ -249,12 +249,18 @@ int cli_provision(int argc, char** argv) {
             else if (a == "-h" || a == "--help") {
                 std::printf(
                     "Usage:\n"
-                    "  tee-anchor provision --tee-type sgx --quote <file> --ca-key <file> --ca-cert <file> --out <file> [options]\n"
-                    "  tee-anchor provision --tee-type tdx --quote <file> --ca-key <file> --ca-cert <file> --out <file> [options]\n"
+                    "  tee-anchor provision --tee-type sgx --report <file> --ca-key <file> --ca-cert <file> --out <file> [options]\n"
+                    "  tee-anchor provision --tee-type tdx --report <file> --ca-key <file> --ca-cert <file> --out <file> [options]\n"
                     "  tee-anchor provision --tee-type snp --report <file> --certs <dir> --ca-key <file> --ca-cert <file> --out <file> [options]\n"
-                    "  tee-anchor provision --tee-type cca --token <file> --ca-key <file> --ca-cert <file> --out <file> [options]\n"
+                    "  tee-anchor provision --tee-type cca --report <file> --ca-key <file> --ca-cert <file> --out <file> [options]\n"
                     "\n"
                     "Common options:\n"
+                    "  --report <file>        (required) attestation report (AR) of the attester machine.\n"
+                    "                         The per-TEE evidence is passed with this single option:\n"
+                    "                           sgx: SGX Quote      (binary, e.g. quote.dat)\n"
+                    "                           tdx: TD Quote       (binary, e.g. quote.dat)\n"
+                    "                           snp: SNP report     (binary, report.bin)\n"
+                    "                           cca: CCA token      (CBOR, cca-token.cbor)\n"
                     "  --ca-key <file>        (required) organization CA private key (PEM)\n"
                     "  --ca-cert <file>       (required) organization CA certificate (PEM)\n"
                     "  --out <file>           (required) output endorsement cert (PEM)\n"
@@ -262,16 +268,9 @@ int cli_provision(int argc, char** argv) {
                     "  --validity-days <N>    endorsement validity in days (default: 365)\n"
                     "  --tee-type <sgx|tdx|snp|cca>  TEE type (default: sgx)\n"
                     "\n"
-                    "SGX/TDX options (--tee-type sgx | tdx):\n"
-                    "  --quote <file>         (required) SGX Quote or TD Quote (binary, e.g. quote.dat)\n"
-                    "\n"
                     "SEV-SNP options (--tee-type snp):\n"
-                    "  --report <file>        (required) SNP attestation report (binary, report.bin)\n"
                     "  --certs <dir>          (required) dir with ark.pem/ask.pem/vcek.pem\n"
-                    "                         (chain + report signature verified natively)\n"
-                    "\n"
-                    "Arm CCA options (--tee-type cca):\n"
-                    "  --token <file>         (required) CCA attestation token (CBOR, cca-token.cbor)\n");
+                    "                         (chain + report signature verified natively)\n");
                 return 0;
             }
             else {

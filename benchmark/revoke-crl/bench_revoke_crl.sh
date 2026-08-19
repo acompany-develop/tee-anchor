@@ -125,7 +125,7 @@ CRL="$WORK/crl.pem"
 
 "$TEE_ANCHOR" ca-init --out-dir "$WORK" --curve "$CA_CURVE" --force >/dev/null 2>&1 \
     || die "署名用 CA の ca-init に失敗しました。"
-"$TEE_ANCHOR" provision --tee-type "$TEE_TYPE" --quote "$QUOTE" \
+"$TEE_ANCHOR" provision --tee-type "$TEE_TYPE" --report "$QUOTE" \
     --ca-key "$CA_KEY" --ca-cert "$CA_CERT" --out "$ENDORSE" >/dev/null 2>&1 \
     || die "失効対象 endorsement の provision に失敗しました ($TEE_TYPE): $QUOTE"
 

@@ -47,7 +47,7 @@ run:
 token:
 	@test -x "$(CCA_WORKSPACE)/qemu/build/qemu-system-aarch64" || { echo "QEMU 未ビルド。先に 'make setup'"; exit 1; }
 	@CCA_WORKSPACE="$(CCA_WORKSPACE)" python3 drive-realm.py --out "$(CURDIR)/cca-token.cbor"
-	@echo "saved: $(CURDIR)/cca-token.cbor （TEE Anchor の --token に渡す入力）"
+	@echo "saved: $(CURDIR)/cca-token.cbor （TEE Anchor の --report に渡す入力）"
 
 clean:
 	@rm -f cca-token.cbor cca-token.b64 cca-token*.cbor

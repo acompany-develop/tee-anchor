@@ -12,7 +12,7 @@
 #   ./extract-cca-token.sh realm-console.log      # ログファイルから抽出
 #   pbpaste | ./extract-cca-token.sh              # クリップボードから
 #
-# 出力: cca-token.cbor （TEE Anchor の --token に渡す入力）
+# 出力: cca-token.cbor （TEE Anchor の --report に渡す入力）
 set -euo pipefail
 
 OUT="${OUT:-cca-token.cbor}"

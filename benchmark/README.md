@@ -123,7 +123,7 @@ OpenSSL で**インプロセス**実行し、さらに組織 endorsement chain +
 3. 組織 endorsement を発行:
    ```bash
    tee-anchor ca-init   --out-dir ~/cca_verify_bundle
-   tee-anchor provision --tee-type cca --token ~/cca_verify_bundle/cca-token.cbor \
+   tee-anchor provision --tee-type cca --report ~/cca_verify_bundle/cca-token.cbor \
        --ca-key ~/cca_verify_bundle/ca.key --ca-cert ~/cca_verify_bundle/ca.crt \
        --out ~/cca_verify_bundle/cca_endorsement.crt
    ```
@@ -202,7 +202,7 @@ BENCH=1 BENCH_RUNS=15 BENCH_WARMUP=5 \
 環境変数: `BENCH`(=1で有効) `BENCH_RUNS`(既定 15) `BENCH_WARMUP`(既定 5)
 `BENCH_OUT`(既定 ./bench_sgx.json) `QUOTE_OUT`(既定 ./quote.dat) `TEE_ANCHOR`
 `ORG_CERT`(既定 ./sgx_endorsement.crt) `ORG_CA`(既定 ./ca.crt) `ORG_CRL`(任意; 未指定なら C スキップ)。
-`ORG_CERT` は `tee-anchor provision --tee-type sgx --quote ... ` で、`ORG_CRL` は
+`ORG_CERT` は `tee-anchor provision --tee-type sgx --report ... ` で、`ORG_CRL` は
 `tee-anchor crl-issue ...` で事前発行しておく（対象が未失効なら C は exit 0、失効済みなら exit 24）。
 
 **注意 (解釈)**: TDX 同様の**加算オーバーヘッド**だが、ベースライン A が MAA への
@@ -237,9 +237,9 @@ TEE ごとに異なるのは **入力（証拠）と内部のベンダー検証�
 
 | TEE | 入力フラグ | 入力の既定探索 | 内部のベンダー検証 |
 |-----|-----------|---------------|-------------------|
-| SGX | `--quote <file>` | `QUOTE=` / `Humane-RAFW-MAA(-rev)/quote.dat` | Quote 内蔵 PCK チェーンをインプロセス検証 |
-| TDX | `--quote <file>` | `QUOTE=` / `Humane-RAFW-TDX/.../quote.dat` | TD Quote(v4/v5) 内蔵 PCK チェーンをインプロセス検証 |
-| CCA | `--token <file>` | `TOKEN=` / `~/cca_verify_bundle/cca-token.cbor` | pin 済み CPAK で COSE/ES384 をインプロセス検証 |
+| SGX | `--report <file>` | `QUOTE=` / `Humane-RAFW-MAA(-rev)/quote.dat` | Quote 内蔵 PCK チェーンをインプロセス検証 |
+| TDX | `--report <file>` | `QUOTE=` / `Humane-RAFW-TDX/.../quote.dat` | TD Quote(v4/v5) 内蔵 PCK チェーンをインプロセス検証 |
+| CCA | `--report <file>` | `TOKEN=` / `~/cca_verify_bundle/cca-token.cbor` | pin 済み CPAK で COSE/ES384 をインプロセス検証 |
 | SNP | `--report <file>` `--certs <dir>` | `BUNDLE_DIR=` (既定 `~/snp_verify_bundle`) の `report.bin` / `certs/` | ARK pin 照合 + ARK→ASK→VCEK チェーン + Report 署名を**インプロセス**検証 |
 
 ```bash
